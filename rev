@@ -1,12 +1,11 @@
 *---------------------------------------------------------------------*
-*   Apply NEW CMX rules
+*   Apply NEW CMXS rules (TRANSITION BASED)
 *---------------------------------------------------------------------*
 
-" Case 1: LOCKED → REMOVE CMXS → SEND CPI
+" LKD → REMOVE CMXS → SEND CPI
 IF lv_locked_active = abap_true.
   lv_stat        = 'I0043'.
   lv_remove_cmxs = abap_true.
-  lv_send_cpi    = abap_true.
 
   gs_output-msg = 'LKD → REMOVE CMXS → SEND CPI'.
   PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
@@ -15,11 +14,10 @@ IF lv_locked_active = abap_true.
   RETURN.
 ENDIF.
 
-" Case 2: TECO → REMOVE CMXS → SEND CPI
+" TECO → REMOVE CMXS → SEND CPI
 IF lv_teco_active = abap_true.
   lv_stat        = 'I0045'.
   lv_remove_cmxs = abap_true.
-  lv_send_cpi    = abap_true.
 
   gs_output-msg = 'TECO → REMOVE CMXS → SEND CPI'.
   PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
@@ -28,12 +26,12 @@ IF lv_teco_active = abap_true.
   RETURN.
 ENDIF.
 
-" Case 3 & 4: UNLOCKED or TECO Cancelled (REL)
-IF lv_rel_active = abap_true.
+" UNLOCKED / TECO CANCELLED → SET CMXS → SEND CPI
+IF lv_rel_active = abap_true
+AND ( lv_prev_locked = abap_true OR lv_cmxs_active = abap_false ).
 
   lv_stat     = 'I0002'.
   lv_set_cmxs = abap_true.
-  lv_send_cpi = abap_true.
 
   IF lv_prev_locked = abap_true.
     gs_output-msg = 'UNLOCKED → SET CMXS → SEND CPI'.
