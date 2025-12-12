@@ -293,7 +293,7 @@ FORM f_check_status USING ps_order TYPE viaufkst.
     CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
   ENDIF.
 
-  IF lv_jcds_ts IS INITIAL AND lv_cdhdr_ts IS INITIAL.
+  IF lv_jcds_ts IS INITIAL OR lv_cdhdr_ts IS INITIAL.
     RETURN.
   ENDIF.
 
@@ -521,9 +521,13 @@ FORM f_send_cmx.
           ls_return  TYPE bapiret2.
 
     CLEAR: lt_header, lt_status, lt_methods, lt_return.
-
     APPEND VALUE #( orderid = <ls_output_row>-MaintenanceOrder ) TO lt_header.
-    APPEND VALUE #( user_st_text = 'CMXS' langu = sy-langu ) TO lt_status.
+     IF <ls_output_row>-SystemStatusText = 'LKD'
+      OR <ls_output_row>-SystemStatusText = 'TECO'.
+    APPEND VALUE #( user_st_text = 'CMXS' inactive = 'X' langu = sy-langu ) TO lt_status.
+    ELSE.
+      APPEND VALUE #( user_st_text = 'CMXS' langu = sy-langu ) TO lt_status.
+      ENDIF.
 
     APPEND VALUE #( refnumber = '00001' objecttype = 'HEADER' method = 'CHANGE'
                     objectkey = <ls_output_row>-MaintenanceOrder ) TO lt_methods.
