@@ -1,7 +1,36 @@
-" Determine from system status text
-IF <ls_output_row>-SystemStatusText = 'TECO'
- OR <ls_output_row>-SystemStatusText = 'LKD'.
-  lv_remove_cmxs = abap_true.
+*---------------------------------------------------------------------*
+* Decide final status & prepare output
+*---------------------------------------------------------------------*
+IF lv_locked_active = abap_true.
+  lv_stat = 'I0043'.
+
+ELSEIF lv_teco_active = abap_true.
+  lv_stat = 'I0045'.
+
+ELSEIF lv_rel_active = abap_true.
+  lv_stat = 'I0002'.
+
 ELSE.
-  lv_remove_cmxs = abap_false.
+  RETURN.
 ENDIF.
+
+PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+
+" pass CMXS decision to sender
+gs_output-lv_remove_cmxs = lv_remove_cmxs.
+
+IF lv_locked_active = abap_true.
+  gs_output-msg = 'LKD – send to CPI'.
+
+ELSEIF lv_teco_active = abap_true.
+  gs_output-msg = 'TECO – send to CPI'.
+
+ELSEIF lv_rel_active = abap_true AND lv_cmxs_active = abap_true.
+  gs_output-msg = 'REL with CMXS and changes – send to CPI'.
+
+ELSE.
+  gs_output-msg = 'REL – send to CPI'.
+ENDIF.
+
+APPEND gs_output TO gt_output.
+SORT gt_output BY MaintenanceOrder.
