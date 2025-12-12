@@ -1,36 +1,48 @@
 *---------------------------------------------------------------------*
-* Decide final status & prepare output
+*   Apply NEW CMX rules
 *---------------------------------------------------------------------*
+
+" Case 1: LOCKED → REMOVE CMXS → SEND CPI
 IF lv_locked_active = abap_true.
-  lv_stat = 'I0043'.
+  lv_stat        = 'I0043'.
+  lv_remove_cmxs = abap_true.
+  lv_send_cpi    = abap_true.
 
-ELSEIF lv_teco_active = abap_true.
-  lv_stat = 'I0045'.
-
-ELSEIF lv_rel_active = abap_true.
-  lv_stat = 'I0002'.
-
-ELSE.
+  gs_output-msg = 'LKD → REMOVE CMXS → SEND CPI'.
+  PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+  APPEND gs_output TO gt_output.
+  SORT gt_output BY MaintenanceOrder.
   RETURN.
 ENDIF.
 
-PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+" Case 2: TECO → REMOVE CMXS → SEND CPI
+IF lv_teco_active = abap_true.
+  lv_stat        = 'I0045'.
+  lv_remove_cmxs = abap_true.
+  lv_send_cpi    = abap_true.
 
-" pass CMXS decision to sender
-gs_output-lv_remove_cmxs = lv_remove_cmxs.
-
-IF lv_locked_active = abap_true.
-  gs_output-msg = 'LKD – send to CPI'.
-
-ELSEIF lv_teco_active = abap_true.
-  gs_output-msg = 'TECO – send to CPI'.
-
-ELSEIF lv_rel_active = abap_true AND lv_cmxs_active = abap_true.
-  gs_output-msg = 'REL with CMXS and changes – send to CPI'.
-
-ELSE.
-  gs_output-msg = 'REL – send to CPI'.
+  gs_output-msg = 'TECO → REMOVE CMXS → SEND CPI'.
+  PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+  APPEND gs_output TO gt_output.
+  SORT gt_output BY MaintenanceOrder.
+  RETURN.
 ENDIF.
 
-APPEND gs_output TO gt_output.
-SORT gt_output BY MaintenanceOrder.
+" Case 3 & 4: UNLOCKED or TECO Cancelled (REL)
+IF lv_rel_active = abap_true.
+
+  lv_stat     = 'I0002'.
+  lv_set_cmxs = abap_true.
+  lv_send_cpi = abap_true.
+
+  IF lv_prev_locked = abap_true.
+    gs_output-msg = 'UNLOCKED → SET CMXS → SEND CPI'.
+  ELSE.
+    gs_output-msg = 'TECO CANCELLED (REL) → SET CMXS → SEND CPI'.
+  ENDIF.
+
+  PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+  APPEND gs_output TO gt_output.
+  SORT gt_output BY MaintenanceOrder.
+  RETURN.
+ENDIF.
