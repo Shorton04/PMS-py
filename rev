@@ -109,11 +109,11 @@ IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
   CONCATENATE so_date-low so_time-low INTO lv_input_ts.
   CONCATENATE sy-mandt ‘30’ ps_order-aufnr INTO lv_objid.
 
+“ Check for ANY status changes in JCDS (not just specific statuses)
 SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
 INTO ( @lv_sts_date, @lv_sts_time )
 FROM jcds
 WHERE objnr = @ps_order-objnr
-AND stat IN ( ‘I0043’, ‘I0045’, ‘I0002’ )
 AND ( ( udate > @so_date-low )
 OR ( udate = @so_date-low AND utime > @so_time-low ) ).
 
@@ -121,6 +121,7 @@ IF sy-subrc = 0 AND lv_sts_date IS NOT INITIAL.
 CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
 ENDIF.
 
+“ Check for ANY changes in CDHDR
 SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
 INTO ( @lv_chg_date, @lv_chg_time )
 FROM cdhdr
@@ -133,6 +134,7 @@ IF sy-subrc = 0 AND lv_chg_date IS NOT INITIAL.
 CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
 ENDIF.
 
+“ If no changes found in either table within the time range, skip order
 IF lv_jcds_ts IS INITIAL AND lv_cdhdr_ts IS INITIAL.
 RETURN.
 ENDIF.
