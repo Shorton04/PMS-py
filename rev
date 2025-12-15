@@ -1,4 +1,30 @@
-" Check REL status (I0002)
+ " Debug: Check what's in gt_jest for this order
+  DATA: lv_jest_count TYPE i.
+  
+  LOOP AT gt_jest INTO DATA(ls_jest_debug) WHERE objnr = ps_order-objnr.
+    lv_jest_count = lv_jest_count + 1.
+    WRITE: / 'DEBUG JEST - Order:', ps_order-aufnr, 
+             'Status:', ls_jest_debug-stat, 
+             'Inactive:', ls_jest_debug-inact.
+  ENDLOOP.
+  
+  IF lv_jest_count = 0.
+    WRITE: / 'WARNING: No JEST records found in gt_jest for order', ps_order-aufnr, 
+             'ObjNr:', ps_order-objnr.
+    " Fallback to direct DB query
+    SELECT stat, inact
+      FROM jest
+      WHERE objnr = @ps_order-objnr
+      INTO TABLE @DATA(lt_jest_direct).
+    
+    LOOP AT lt_jest_direct INTO DATA(ls_jest_direct).
+      WRITE: / 'DEBUG DIRECT - Order:', ps_order-aufnr, 
+               'Status:', ls_jest_direct-stat, 
+               'Inactive:', ls_jest_direct-inact.
+    ENDLOOP.
+  ENDIF.
+
+  " Check REL status (I0002)
   READ TABLE gt_jest TRANSPORTING NO FIELDS
     WITH KEY objnr = ps_order-objnr
              stat  = 'I0002'
@@ -6,6 +32,7 @@
     BINARY SEARCH.
   IF sy-subrc = 0.
     lv_rel_active = abap_true.
+    WRITE: / 'DEBUG: REL (I0002) is ACTIVE for order', ps_order-aufnr.
   ENDIF.
 
   " Check TECO status (I0045)
@@ -16,6 +43,7 @@
     BINARY SEARCH.
   IF sy-subrc = 0.
     lv_teco_active = abap_true.
+    WRITE: / 'DEBUG: TECO (I0045) is ACTIVE for order', ps_order-aufnr.
   ENDIF.
 
   " Check LOCKED status (I0043)
@@ -26,6 +54,7 @@
     BINARY SEARCH.
   IF sy-subrc = 0.
     lv_locked_active = abap_true.
+    WRITE: / 'DEBUG: LOCKED (I0043) is ACTIVE for order', ps_order-aufnr.
   ENDIF.
 
   " Check CMXS status (E0010) - THIS IS THE CMXS DETECTION
@@ -36,4 +65,16 @@
     BINARY SEARCH.
   IF sy-subrc = 0.
     lv_cmxs_active = abap_true.
+    WRITE: / 'DEBUG: CMXS (E0010) is ACTIVE for order', ps_order-aufnr.
+  ELSE.
+    WRITE: / 'DEBUG: CMXS (E0010) NOT FOUND or INACTIVE for order', ps_order-aufnr.
+    " Double check directly in database
+    SELECT SINGLE stat FROM jest INTO @DATA(lv_cmxs_check)
+      WHERE objnr = @ps_order-objnr 
+      AND stat = 'E0010' 
+      AND inact = ''.
+    IF sy-subrc = 0.
+      WRITE: / 'WARNING: CMXS found in DB but not in gt_jest!'.
+      lv_cmxs_active = abap_true.  " Use DB result
+    ENDIF.
   ENDIF.
