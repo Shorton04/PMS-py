@@ -1,34 +1,33 @@
-DATA lv_cmxs_active TYPE abap_bool VALUE abap_false.
-
-SELECT SINGLE j~stat
-  INTO @DATA(lv_cmx_stat)
-  FROM jest AS j
-  INNER JOIN tj30t AS t
-    ON t~estat = j~stat
- WHERE j~objnr = @ps_order-objnr
-   AND j~inact = ''
-   AND t~txt04 = 'CMXS'
-   AND t~spras = 'E'.
-
-IF sy-subrc = 0.
-  lv_cmxs_active = abap_true.
-ENDIF.
-
-
-
-DATA lv_stsma TYPE tj30-stsma.
-
-SELECT SINGLE stsma
-  INTO lv_stsma
-  FROM jest
- WHERE objnr = ps_order-objnr.
-
-
-
+*---------------------------------------------------------------------*
+* Date-Time filter
+* Always allow REMOVE for TECO / LOCKED
+*---------------------------------------------------------------------*
 IF lv_teco_active = abap_true OR lv_locked_active = abap_true.
-  " bypass date filter for removal
+  " Always process TECO / LOCKED (even outside time window)
 ELSE.
   IF lv_jcds_ts IS INITIAL AND lv_cdhdr_ts IS INITIAL.
     RETURN.
   ENDIF.
 ENDIF.
+
+
+
+*---------------------------------------------------------------------*
+* Get status profile
+*---------------------------------------------------------------------*
+DATA lv_stsma TYPE tj30-stsma.
+
+SELECT SINGLE stsma
+  INTO lv_stsma
+  FROM jest
+ WHERE objnr = <ls_output_row>-MaintenanceOrder.
+
+*---------------------------------------------------------------------*
+* Remove CMXS
+*---------------------------------------------------------------------*
+APPEND VALUE #(
+  user_st_text = 'CMXS'
+  inactive     = 'X'
+  langu        = sy-langu
+  stsma        = lv_stsma
+) TO lt_status.
