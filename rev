@@ -1,46 +1,362 @@
-*---------------------------------------------------------------------*
-*   Apply NEW CMXS rules (TRANSITION BASED)
-*---------------------------------------------------------------------*
+*———————————————————————*
 
-" LKD → REMOVE CMXS → SEND CPI
-IF lv_locked_active = abap_true.
-  lv_stat        = 'I0043'.
-  lv_remove_cmxs = abap_true.
+- Check status (MODIFIED VERSION)
+  *———————————————————————*
+  FORM f_check_status USING ps_order TYPE viaufkst.
+  
+  DATA: lv_obj           TYPE cuobj,
+  lv_value         TYPE atwrt,
+  lv_stat          TYPE jest-stat,
+  lv_vornr         TYPE vornr,
+  lv_objid         TYPE c LENGTH 20,
+  lv_rel_active    TYPE abap_bool VALUE abap_false,
+  lv_teco_active   TYPE abap_bool VALUE abap_false,
+  lv_locked_active TYPE abap_bool VALUE abap_false,
+  lv_cmxs_active   TYPE abap_bool VALUE abap_false,
+  lv_prev_locked   TYPE abap_bool VALUE abap_false,
+  lv_prev_teco     TYPE abap_bool VALUE abap_false,
+  lv_sts_date      TYPE udate,
+  lv_sts_time      TYPE utime,
+  lv_chg_date      TYPE udate,
+  lv_chg_time      TYPE utime,
+  lv_input_ts      TYPE char14,
+  lv_jcds_ts       TYPE char14,
+  lv_cdhdr_ts      TYPE char14.
 
-  gs_output-msg = 'LKD → REMOVE CMXS → SEND CPI'.
-  PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-  APPEND gs_output TO gt_output.
-  SORT gt_output BY MaintenanceOrder.
+*———————————————————————*
+
+- CRITICAL FIX: Check for duplicate at the very start
+  *———————————————————————*
+  READ TABLE gt_output TRANSPORTING NO FIELDS
+  WITH KEY MaintenanceOrder = ps_order-aufnr
+  BINARY SEARCH.
+  IF sy-subrc = 0.
   RETURN.
-ENDIF.
-
-" TECO → REMOVE CMXS → SEND CPI
-IF lv_teco_active = abap_true.
-  lv_stat        = 'I0045'.
-  lv_remove_cmxs = abap_true.
-
-  gs_output-msg = 'TECO → REMOVE CMXS → SEND CPI'.
-  PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-  APPEND gs_output TO gt_output.
-  SORT gt_output BY MaintenanceOrder.
-  RETURN.
-ENDIF.
-
-" UNLOCKED / TECO CANCELLED → SET CMXS → SEND CPI
-IF lv_rel_active = abap_true
-AND ( lv_prev_locked = abap_true OR lv_cmxs_active = abap_false ).
-
-  lv_stat     = 'I0002'.
-  lv_set_cmxs = abap_true.
-
-  IF lv_prev_locked = abap_true.
-    gs_output-msg = 'UNLOCKED → SET CMXS → SEND CPI'.
-  ELSE.
-    gs_output-msg = 'TECO CANCELLED (REL) → SET CMXS → SEND CPI'.
   ENDIF.
 
-  PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-  APPEND gs_output TO gt_output.
-  SORT gt_output BY MaintenanceOrder.
+*———————————————————————*
+
+- Classification (INTERFACE = CMX)
+  *———————————————————————*
+  CLEAR lv_obj.
+  IF ps_order-equnr IS NOT INITIAL.
+  SELECT SINGLE cuobj INTO @lv_obj FROM inob WHERE objek = @ps_order-equnr.
+  ENDIF.
+  IF lv_obj IS INITIAL AND ps_order-tplnr IS NOT INITIAL.
+  SELECT SINGLE cuobj INTO @lv_obj FROM inob WHERE objek = @ps_order-tplnr.
+  ENDIF.
+  IF lv_obj IS INITIAL.
   RETURN.
+  ENDIF.
+
+SELECT SINGLE atwrt INTO @lv_value
+FROM ausp
+WHERE objek = @lv_obj AND atinn = @gv_atinn.
+IF sy-subrc <> 0 OR lv_value <> ‘CMX’.
+RETURN.
 ENDIF.
+
+*———————————————————————*
+
+- Detect current active statuses
+  *———————————————————————*
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+  WHERE objnr = @ps_order-objnr AND stat = ‘I0002’ AND inact = ‘’.
+  IF sy-subrc = 0. lv_rel_active = abap_true. ENDIF.
+
+SELECT SINGLE stat FROM jest INTO @lv_stat
+WHERE objnr = @ps_order-objnr AND stat = ‘I0045’ AND inact = ‘’.
+IF sy-subrc = 0. lv_teco_active = abap_true. ENDIF.
+
+SELECT SINGLE stat FROM jest INTO @lv_stat
+WHERE objnr = @ps_order-objnr AND stat = ‘I0043’ AND inact = ‘’.
+IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
+
+SELECT SINGLE stat FROM jest INTO @lv_stat
+WHERE objnr = @ps_order-objnr AND stat = ‘E0010’ AND inact = ‘’.
+IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
+
+*———————————————————————*
+
+- Check if order was previously locked (now unlocked)
+  *———————————————————————*
+  SELECT SINGLE * FROM jcds
+  WHERE objnr = @ps_order-objnr
+  AND stat  = ‘I0043’
+  AND inact = ‘X’
+  INTO @DATA(ls_prev_lkd).
+  IF sy-subrc = 0.
+  lv_prev_locked = abap_true.
+  ENDIF.
+
+*———————————————————————*
+
+- Check if order was previously TECO (now cancelled)
+  *———————————————————————*
+  SELECT SINGLE * FROM jcds
+  WHERE objnr = @ps_order-objnr
+  AND stat  = ‘I0045’
+  AND inact = ‘X’
+  INTO @DATA(ls_prev_teco).
+  IF sy-subrc = 0.
+  lv_prev_teco = abap_true.
+  ENDIF.
+
+*———————————————————————*
+
+- Date-Time Range filtering
+  *———————————————————————*
+  CONCATENATE so_date-low so_time-low INTO lv_input_ts.
+  CONCATENATE sy-mandt ‘30’ ps_order-aufnr INTO lv_objid.
+
+SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+INTO ( @lv_sts_date, @lv_sts_time )
+FROM jcds
+WHERE objnr = @ps_order-objnr
+AND stat IN ( ‘I0043’, ‘I0045’, ‘I0002’ )
+AND ( ( udate > @so_date-low )
+OR ( udate = @so_date-low AND utime > @so_time-low ) ).
+
+IF sy-subrc = 0 AND lv_sts_date IS NOT INITIAL.
+CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
+ENDIF.
+
+SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+INTO ( @lv_chg_date, @lv_chg_time )
+FROM cdhdr
+WHERE objectclas = ‘ORDER’
+AND objectid   = @lv_objid
+AND ( ( udate > @so_date-low )
+OR ( udate = @so_date-low AND utime > @so_time-low ) ).
+
+IF sy-subrc = 0 AND lv_chg_date IS NOT INITIAL.
+CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
+ENDIF.
+
+IF lv_jcds_ts IS INITIAL AND lv_cdhdr_ts IS INITIAL.
+RETURN.
+ENDIF.
+
+*———————————————————————*
+
+- Get operation
+  *———————————————————————*
+  PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
+
+*———————————————————————*
+
+- NEW LOGIC: Handle LKD, TECO, Unlocked, and TECO Cancelled
+  *———————————————————————*
+
+“ 1. LOCKED → Remove CMXS and send to CPI
+IF lv_locked_active = abap_true.
+lv_stat = ‘I0043’.
+PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+
+```
+IF lv_cmxs_active = abap_true.
+  gs_output-msg = 'Locked - Remove CMXS and send to CPI'.
+  gs_output-cmxs_action = 'REMOVE'.  " Flag for removal
+ELSE.
+  gs_output-msg = 'Locked without CMXS - send to CPI'.
+  gs_output-cmxs_action = 'NONE'.
+ENDIF.
+
+APPEND gs_output TO gt_output.
+SORT gt_output BY MaintenanceOrder.
+RETURN.
+```
+
+ENDIF.
+
+“ 2. TECO → Remove CMXS and send to CPI
+IF lv_teco_active = abap_true.
+lv_stat = ‘I0045’.
+PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+
+```
+IF lv_cmxs_active = abap_true.
+  gs_output-msg = 'TECO - Remove CMXS and send to CPI'.
+  gs_output-cmxs_action = 'REMOVE'.  " Flag for removal
+ELSE.
+  gs_output-msg = 'TECO without CMXS - send to CPI'.
+  gs_output-cmxs_action = 'NONE'.
+ENDIF.
+
+APPEND gs_output TO gt_output.
+SORT gt_output BY MaintenanceOrder.
+RETURN.
+```
+
+ENDIF.
+
+“ 3. UNLOCKED (previously locked) → Set CMXS and send to CPI
+IF lv_rel_active = abap_true AND lv_prev_locked = abap_true.
+lv_stat = ‘I0002’.
+PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+
+```
+IF lv_cmxs_active = abap_false.
+  gs_output-msg = 'Unlocked - Set CMXS and send to CPI'.
+  gs_output-cmxs_action = 'SET'.  " Flag for setting
+ELSE.
+  gs_output-msg = 'Unlocked with existing CMXS - send to CPI'.
+  gs_output-cmxs_action = 'NONE'.
+ENDIF.
+
+APPEND gs_output TO gt_output.
+SORT gt_output BY MaintenanceOrder.
+RETURN.
+```
+
+ENDIF.
+
+“ 4. TECO CANCELLED (previously TECO, now REL) → Set CMXS and send to CPI
+IF lv_rel_active = abap_true AND lv_prev_teco = abap_true.
+lv_stat = ‘I0002’.
+PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+
+```
+IF lv_cmxs_active = abap_false.
+  gs_output-msg = 'TECO Cancelled - Set CMXS and send to CPI'.
+  gs_output-cmxs_action = 'SET'.  " Flag for setting
+ELSE.
+  gs_output-msg = 'TECO Cancelled with existing CMXS - send to CPI'.
+  gs_output-cmxs_action = 'NONE'.
+ENDIF.
+
+APPEND gs_output TO gt_output.
+SORT gt_output BY MaintenanceOrder.
+RETURN.
+```
+
+ENDIF.
+
+“ 5. Normal REL (not previously locked or TECO)
+IF lv_rel_active = abap_true.
+lv_stat = ‘I0002’.
+PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+
+```
+IF lv_cmxs_active = abap_false.
+  gs_output-msg = 'REL - Set CMXS and send to CPI'.
+  gs_output-cmxs_action = 'SET'.
+ELSE.
+  gs_output-msg = 'REL with CMXS - send to CPI'.
+  gs_output-cmxs_action = 'NONE'.
+ENDIF.
+
+APPEND gs_output TO gt_output.
+SORT gt_output BY MaintenanceOrder.
+```
+
+ENDIF.
+
+ENDFORM.
+
+*———————————————————————*
+
+- Update SAP status (MODIFIED VERSION)
+  *———————————————————————*
+  FORM f_send_cmx.
+  
+  DATA lv_mode TYPE char10.
+  
+  IF p_test = abap_true.
+  lv_mode = ‘TEST’.
+  ELSE.
+  lv_mode = ‘LIVE’.
+  ENDIF.
+  
+  LOOP AT gt_output ASSIGNING FIELD-SYMBOL(<ls_output_row>).
+  
+  “ Test mode simulation
+  IF lv_mode = ‘TEST’.
+  CASE <ls_output_row>-cmxs_action.
+  WHEN ‘SET’.
+  <ls_output_row>-msg = |[Test Mode] Would SET CMXS for order { <ls_output_row>-MaintenanceOrder }|.
+  WHEN ‘REMOVE’.
+  <ls_output_row>-msg = |[Test Mode] Would REMOVE CMXS for order { <ls_output_row>-MaintenanceOrder }|.
+  WHEN OTHERS.
+  <ls_output_row>-msg = |[Test Mode] No CMXS action for order { <ls_output_row>-MaintenanceOrder }|.
+  ENDCASE.
+  CONTINUE.
+  ENDIF.
+  
+  “ Live mode execution
+  DATA: lt_header  TYPE TABLE OF bapi_alm_order_headers_i,
+  lt_status  TYPE TABLE OF bapi_alm_order_usrstat,
+  lt_methods TYPE TABLE OF bapi_alm_order_method,
+  lt_return  TYPE TABLE OF bapiret2,
+  ls_return  TYPE bapiret2.
+  
+  CLEAR: lt_header, lt_status, lt_methods, lt_return.
+  
+  “ Only process if there’s a CMXS action
+  IF <ls_output_row>-cmxs_action = ‘NONE’.
+  <ls_output_row>-msg = ‘No CMXS change needed’.
+  CONTINUE.
+  ENDIF.
+  
+  APPEND VALUE #( orderid = <ls_output_row>-MaintenanceOrder ) TO lt_header.
+  
+  CASE <ls_output_row>-cmxs_action.
+  WHEN ‘SET’.
+  “ Set CMXS status (activate)
+  APPEND VALUE #( user_st_text = ‘CMXS’
+  langu = sy-langu
+  status_inactive = ‘’ ) TO lt_status.
+  
+  ```
+    <ls_output_row>-msg = 'Setting CMXS status...'.
+  
+  WHEN 'REMOVE'.
+    " Remove CMXS status (inactivate)
+    APPEND VALUE #( user_st_text = 'CMXS' 
+                   langu = sy-langu 
+                   status_inactive = 'X' ) TO lt_status.
+    
+    <ls_output_row>-msg = 'Removing CMXS status...'.
+  ```
+  
+  ENDCASE.
+  
+  APPEND VALUE #( refnumber = ‘00001’ objecttype = ‘HEADER’ method = ‘CHANGE’
+  objectkey = <ls_output_row>-MaintenanceOrder ) TO lt_methods.
+  APPEND VALUE #( refnumber = ‘00001’ objecttype = ‘USERSTATUS’ method = ‘CHANGE’
+  objectkey = <ls_output_row>-MaintenanceOrder ) TO lt_methods.
+  APPEND VALUE #( refnumber = ‘00003’ objecttype = ‘ORDER’ method = ‘SAVE’
+  objectkey = <ls_output_row>-MaintenanceOrder ) TO lt_methods.
+  
+  CALL FUNCTION ‘BAPI_ALM_ORDER_MAINTAIN’
+  TABLES
+  it_header     = lt_header
+  it_methods    = lt_methods
+  it_userstatus = lt_status
+  return        = lt_return.
+  
+  READ TABLE lt_return INTO ls_return WITH KEY type = ‘E’.
+  IF sy-subrc = 0.
+  <ls_output_row>-msg = ls_return-message(72).
+  CALL FUNCTION ‘BAPI_TRANSACTION_ROLLBACK’.
+  ELSE.
+  IF <ls_output_row>-cmxs_action = ‘SET’.
+  <ls_output_row>-msg = ‘CMXS status set successfully’.
+  ELSE.
+  <ls_output_row>-msg = ‘CMXS status removed successfully’.
+  ENDIF.
+  
+  ```
+  CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+    EXPORTING
+      wait = 'X'.
+  MESSAGE s008(zmsg_a2r).
+  ```
+  
+  ENDIF.
+  
+  ENDLOOP.
+  
+  COMMIT WORK.
+
+ENDFORM.
