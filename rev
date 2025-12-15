@@ -155,11 +155,9 @@ PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
 
 ```
 IF lv_cmxs_active = abap_true.
-  gs_output-msg = 'Locked - Remove CMXS and send to CPI'.
-  gs_output-cmxs_action = 'REMOVE'.  " Flag for removal
+  gs_output-msg = 'REMOVE_CMXS|Locked - Remove CMXS and send to CPI'.
 ELSE.
-  gs_output-msg = 'Locked without CMXS - send to CPI'.
-  gs_output-cmxs_action = 'NONE'.
+  gs_output-msg = 'NO_ACTION|Locked without CMXS - send to CPI'.
 ENDIF.
 
 APPEND gs_output TO gt_output.
@@ -176,11 +174,9 @@ PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
 
 ```
 IF lv_cmxs_active = abap_true.
-  gs_output-msg = 'TECO - Remove CMXS and send to CPI'.
-  gs_output-cmxs_action = 'REMOVE'.  " Flag for removal
+  gs_output-msg = 'REMOVE_CMXS|TECO - Remove CMXS and send to CPI'.
 ELSE.
-  gs_output-msg = 'TECO without CMXS - send to CPI'.
-  gs_output-cmxs_action = 'NONE'.
+  gs_output-msg = 'NO_ACTION|TECO without CMXS - send to CPI'.
 ENDIF.
 
 APPEND gs_output TO gt_output.
@@ -197,11 +193,9 @@ PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
 
 ```
 IF lv_cmxs_active = abap_false.
-  gs_output-msg = 'Unlocked - Set CMXS and send to CPI'.
-  gs_output-cmxs_action = 'SET'.  " Flag for setting
+  gs_output-msg = 'SET_CMXS|Unlocked - Set CMXS and send to CPI'.
 ELSE.
-  gs_output-msg = 'Unlocked with existing CMXS - send to CPI'.
-  gs_output-cmxs_action = 'NONE'.
+  gs_output-msg = 'NO_ACTION|Unlocked with existing CMXS - send to CPI'.
 ENDIF.
 
 APPEND gs_output TO gt_output.
@@ -218,11 +212,9 @@ PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
 
 ```
 IF lv_cmxs_active = abap_false.
-  gs_output-msg = 'TECO Cancelled - Set CMXS and send to CPI'.
-  gs_output-cmxs_action = 'SET'.  " Flag for setting
+  gs_output-msg = 'SET_CMXS|TECO Cancelled - Set CMXS and send to CPI'.
 ELSE.
-  gs_output-msg = 'TECO Cancelled with existing CMXS - send to CPI'.
-  gs_output-cmxs_action = 'NONE'.
+  gs_output-msg = 'NO_ACTION|TECO Cancelled with existing CMXS - send to CPI'.
 ENDIF.
 
 APPEND gs_output TO gt_output.
@@ -239,11 +231,9 @@ PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
 
 ```
 IF lv_cmxs_active = abap_false.
-  gs_output-msg = 'REL - Set CMXS and send to CPI'.
-  gs_output-cmxs_action = 'SET'.
+  gs_output-msg = 'SET_CMXS|REL - Set CMXS and send to CPI'.
 ELSE.
-  gs_output-msg = 'REL with CMXS - send to CPI'.
-  gs_output-cmxs_action = 'NONE'.
+  gs_output-msg = 'NO_ACTION|REL with CMXS - send to CPI'.
 ENDIF.
 
 APPEND gs_output TO gt_output.
@@ -260,7 +250,9 @@ ENDFORM.
   *———————————————————————*
   FORM f_send_cmx.
   
-  DATA lv_mode TYPE char10.
+  DATA: lv_mode   TYPE char10,
+  lv_action TYPE char20,
+  lv_msg    TYPE char100.
   
   IF p_test = abap_true.
   lv_mode = ‘TEST’.
@@ -270,15 +262,21 @@ ENDFORM.
   
   LOOP AT gt_output ASSIGNING FIELD-SYMBOL(<ls_output_row>).
   
+  “ Parse action from msg field (format: ACTION|Description)
+  CLEAR lv_action.
+  SPLIT <ls_output_row>-msg AT ‘|’ INTO lv_action lv_msg.
+  
   “ Test mode simulation
   IF lv_mode = ‘TEST’.
-  CASE <ls_output_row>-cmxs_action.
-  WHEN ‘SET’.
-  <ls_output_row>-msg = |[Test Mode] Would SET CMXS for order { <ls_output_row>-MaintenanceOrder }|.
-  WHEN ‘REMOVE’.
-  <ls_output_row>-msg = |[Test Mode] Would REMOVE CMXS for order { <ls_output_row>-MaintenanceOrder }|.
+  CASE lv_action.
+  WHEN ‘SET_CMXS’.
+  <ls_output_row>-msg = |[Test Mode] Would SET CMXS: { lv_msg }|.
+  WHEN ‘REMOVE_CMXS’.
+  <ls_output_row>-msg = |[Test Mode] Would REMOVE CMXS: { lv_msg }|.
+  WHEN ‘NO_ACTION’.
+  <ls_output_row>-msg = |[Test Mode] { lv_msg }|.
   WHEN OTHERS.
-  <ls_output_row>-msg = |[Test Mode] No CMXS action for order { <ls_output_row>-MaintenanceOrder }|.
+  <ls_output_row>-msg = |[Test Mode] { <ls_output_row>-msg }|.
   ENDCASE.
   CONTINUE.
   ENDIF.
@@ -292,31 +290,31 @@ ENDFORM.
   
   CLEAR: lt_header, lt_status, lt_methods, lt_return.
   
-  “ Only process if there’s a CMXS action
-  IF <ls_output_row>-cmxs_action = ‘NONE’.
-  <ls_output_row>-msg = ‘No CMXS change needed’.
+  “ Skip if no CMXS action needed
+  IF lv_action = ‘NO_ACTION’ OR lv_action IS INITIAL.
+  <ls_output_row>-msg = lv_msg.
   CONTINUE.
   ENDIF.
   
   APPEND VALUE #( orderid = <ls_output_row>-MaintenanceOrder ) TO lt_header.
   
-  CASE <ls_output_row>-cmxs_action.
-  WHEN ‘SET’.
+  CASE lv_action.
+  WHEN ‘SET_CMXS’.
   “ Set CMXS status (activate)
   APPEND VALUE #( user_st_text = ‘CMXS’
   langu = sy-langu
   status_inactive = ‘’ ) TO lt_status.
   
   ```
-    <ls_output_row>-msg = 'Setting CMXS status...'.
-  
-  WHEN 'REMOVE'.
+  WHEN 'REMOVE_CMXS'.
     " Remove CMXS status (inactivate)
     APPEND VALUE #( user_st_text = 'CMXS' 
                    langu = sy-langu 
                    status_inactive = 'X' ) TO lt_status.
-    
-    <ls_output_row>-msg = 'Removing CMXS status...'.
+  
+  WHEN OTHERS.
+    <ls_output_row>-msg = lv_msg.
+    CONTINUE.
   ```
   
   ENDCASE.
@@ -340,10 +338,10 @@ ENDFORM.
   <ls_output_row>-msg = ls_return-message(72).
   CALL FUNCTION ‘BAPI_TRANSACTION_ROLLBACK’.
   ELSE.
-  IF <ls_output_row>-cmxs_action = ‘SET’.
-  <ls_output_row>-msg = ‘CMXS status set successfully’.
-  ELSE.
-  <ls_output_row>-msg = ‘CMXS status removed successfully’.
+  IF lv_action = ‘SET_CMXS’.
+  <ls_output_row>-msg = |{ lv_msg } - CMXS set successfully|.
+  ELSEIF lv_action = ‘REMOVE_CMXS’.
+  <ls_output_row>-msg = |{ lv_msg } - CMXS removed successfully|.
   ENDIF.
   
   ```
