@@ -1,0 +1,898 @@
+*&---------------------------------------------------------------------*
+*& Include ZTR_A2R_KCMP_STATUS_SEL
+*&---------------------------------------------------------------------*
+
+"───────────────────────────────────────────────
+" 1. ORDER SELECTION
+"───────────────────────────────────────────────
+SELECTION-SCREEN BEGIN OF BLOCK b01 WITH FRAME TITLE TEXT-s01.
+  SELECT-OPTIONS:
+    s_iwerk FOR afih-iwerk OBLIGATORY MEMORY ID WRK,    " Planning Plant
+    s_aufnr FOR aufk-aufnr,               " Order
+    s_auart FOR aufk-auart,               " Order Type
+    s_erdat FOR aufk-erdat,               " Created On
+    s_statin FOR rihea-i_astatin MATCHCODE OBJECT i_status,  " Status Inclusive
+    s_statex FOR rihea-i_astatex MATCHCODE OBJECT i_status,  " Status Exclusive
+    s_gstrp FOR afko-gstrp,               " Basic Start Date
+    s_gltrp FOR afko-gltrp.               " Basic Finish Date
+SELECTION-SCREEN END OF BLOCK b01.
+
+"───────────────────────────────────────────────
+" 2. CRITERIA TO SET STATUS
+"───────────────────────────────────────────────
+SELECTION-SCREEN BEGIN OF BLOCK b02 WITH FRAME TITLE TEXT-s02.
+  PARAMETERS:
+    p_reserv AS CHECKBOX DEFAULT 'X',     " Check planned reservations
+    p_preq   AS CHECKBOX DEFAULT 'X'.     " Check planned purchase requisitions
+SELECTION-SCREEN END OF BLOCK b02.
+
+"───────────────────────────────────────────────
+" 3. SET / RESET USER STATUS
+"───────────────────────────────────────────────
+SELECTION-SCREEN BEGIN OF BLOCK b03 WITH FRAME TITLE TEXT-s03.
+  PARAMETERS:
+    p_estat TYPE tj30t-txt04 DEFAULT 'KCMP' OBLIGATORY, " User Status (Mandatory)
+    p_spras TYPE spras DEFAULT 'E' OBLIGATORY,           " Language Key (Mandatory)
+    p_set   RADIOBUTTON GROUP r1 DEFAULT 'X', " Set Status
+    p_reset RADIOBUTTON GROUP r1.                        " Reset Status
+SELECTION-SCREEN END OF BLOCK b03.
+
+*&---------------------------------------------------------------------*
+*& Include ZTR_A2R_KCMP_STATUS_F01
+*&---------------------------------------------------------------------*
+
+*---------------------------------------------------------------------*
+* FORM: init_defaults
+*---------------------------------------------------------------------*
+FORM init_defaults.
+  gv_user = sy-uname.
+  gv_now  = sy-datum.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM: get_kcmp_status
+*---------------------------------------------------------------------*
+FORM get_kcmp_status.
+  "Resolve ESTAT for the user status text (KCMP)
+  SELECT SINGLE j~estat
+    INTO @gc_estat
+    FROM tj30 AS j
+    INNER JOIN tj30t AS t
+      ON j~estat = t~estat
+   WHERE t~txt04 = @p_estat
+     AND t~spras = @p_spras.
+
+  IF sy-subrc <> 0 OR gc_estat IS INITIAL.
+    MESSAGE e005 WITH p_estat p_spras.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM: validate_selection
+*---------------------------------------------------------------------*
+FORM validate_selection.
+  IF s_aufnr[] IS INITIAL AND s_iwerk[] IS INITIAL.
+    MESSAGE e001.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM: fetch_orders
+*---------------------------------------------------------------------*
+FORM fetch_orders.
+
+  DATA: lsr_orders     TYPE REF TO data,
+        lv_count       TYPE i,
+        g_variant_save TYPE c VALUE ' ',
+        lv_gltrp       TYPE afko-gltrp.
+
+  FIELD-SYMBOLS: <lt_result> TYPE STANDARD TABLE.
+
+  "-----------------------------------------------------------
+  " Clear any previous runtime info and IW39 memory IDs
+  "-----------------------------------------------------------
+  cl_salv_bs_runtime_info=>clear_all( ).
+  FREE MEMORY ID 'RIAUFK20'.
+  FREE MEMORY ID 'G_VARIANT_SAVE'.
+
+  EXPORT no_list_display = abap_true  TO MEMORY ID 'RIAUFK20'.
+  EXPORT g_variant_save  = abap_true  TO MEMORY ID 'G_VARIANT_SAVE'.
+
+  cl_salv_bs_runtime_info=>set(
+    EXPORTING
+      display  = abap_false
+      metadata = abap_false
+      data     = abap_true ).
+
+  SUBMIT riaufk20
+      WITH dy_iar = 'X'
+      WITH aufnr  IN s_aufnr
+      WITH auart  IN s_auart
+      WITH iwerk  IN s_iwerk
+      WITH erdat  IN s_erdat
+      WITH stai1  IN s_statin
+      WITH stae1  IN s_statex
+      WITH gstrp  IN s_gstrp
+      WITH gltrp  IN s_gltrp
+      WITH datuv  EQ '00000000'
+      WITH datub  EQ '00000000'
+      AND RETURN.
+
+  TRY.
+      cl_salv_bs_runtime_info=>get_data_ref( IMPORTING r_data = lsr_orders ).
+      ASSIGN lsr_orders->* TO <lt_result>.
+    CATCH cx_salv_bs_sc_runtime_info INTO DATA(lx_runtime).
+      MESSAGE e030(00) WITH 'Unable to retrieve IW39 data'.
+      RETURN.
+  ENDTRY.
+
+  cl_salv_bs_runtime_info=>clear_all( ).
+  FREE MEMORY ID 'RIAUFK20'.
+  FREE MEMORY ID 'G_VARIANT_SAVE'.
+
+  IF <lt_result> IS ASSIGNED AND <lt_result> IS NOT INITIAL.
+    MOVE-CORRESPONDING <lt_result>[] TO gt_orders[].
+  ELSE.
+    MESSAGE s006(za2r_kcmpmsg).
+    STOP.
+  ENDIF.
+
+  "-----------------------------------------------------------
+  "  Fill RSNUM from VIAUFKST
+  "-----------------------------------------------------------
+  LOOP AT gt_orders ASSIGNING FIELD-SYMBOL(<fs_order>).
+    SELECT SINGLE rsnum
+      FROM viaufkst
+      INTO @<fs_order>-rsnum
+      WHERE aufnr = @<fs_order>-aufnr.
+  ENDLOOP.
+
+  "-----------------------------------------------------------
+  " Filter only released orders (IPHAS = 2)
+  "-----------------------------------------------------------
+  DELETE gt_orders WHERE iphas NE '2'.
+
+  IF gt_orders IS INITIAL.
+    MESSAGE i002 DISPLAY LIKE 'E'.
+    LEAVE LIST-PROCESSING.
+  ENDIF.
+
+  LOOP AT gt_orders ASSIGNING <fs_order>.
+    IF <fs_order>-gltrp IS INITIAL.
+      SELECT SINGLE gltrp
+        FROM afko
+        INTO @lv_gltrp
+        WHERE aufnr = @<fs_order>-aufnr.
+      IF sy-subrc = 0.
+        <fs_order>-gltrp = lv_gltrp.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+  DESCRIBE TABLE gt_orders LINES lv_count.
+  IF lv_count > 0.
+    MESSAGE s021 WITH lv_count.
+  ELSE.
+    MESSAGE i002 DISPLAY LIKE 'E'.
+    LEAVE LIST-PROCESSING.
+  ENDIF.
+
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+* FORM: filter has components
+*---------------------------------------------------------------------*
+FORM filter_has_components.
+
+  DATA: lt_resb         TYPE TABLE OF resb,
+        lt_keep         TYPE TABLE OF lty_order,
+        ls_order        TYPE lty_order,
+        ls_resb         TYPE resb,
+        lv_kcmp_active  TYPE abap_bool,
+        lv_stat         TYPE jest-stat,
+        lv_l_complete   TYPE abap_bool,
+        lv_n_complete   TYPE abap_bool,
+        lv_l_incomplete TYPE abap_bool,
+        lv_n_incomplete TYPE abap_bool,
+        lv_has_l        TYPE abap_bool,
+        lv_has_n        TYPE abap_bool.
+
+  LOOP AT gt_orders INTO ls_order.
+
+    CLEAR: lt_resb, lv_kcmp_active, lv_stat,
+           lv_l_complete, lv_n_complete,
+           lv_l_incomplete, lv_n_incomplete,
+           lv_has_l, lv_has_n.
+
+    "-----------------------------------------------------------------
+    " Fetch RESB entries
+    "-----------------------------------------------------------------
+    IF ls_order-rsnum IS NOT INITIAL.
+      SELECT * FROM resb
+        WHERE rsnum = @ls_order-rsnum
+          AND xloek = @space
+        INTO TABLE @lt_resb.
+    ELSE.
+      SELECT * FROM resb
+        WHERE aufnr = @ls_order-aufnr
+          AND xloek = @space
+        INTO TABLE @lt_resb.
+    ENDIF.
+
+    IF lt_resb IS INITIAL.
+      CONTINUE. " Skip orders with no components
+    ENDIF.
+
+    "-----------------------------------------------------------------
+    " KCMP active check
+    "-----------------------------------------------------------------
+    SELECT SINGLE stat
+      INTO @lv_stat
+      FROM jest
+      WHERE objnr = @ls_order-objnr
+        AND inact = @space
+        AND stat  = @gc_estat.
+
+    IF sy-subrc = 0.
+      lv_kcmp_active = abap_true.
+    ENDIF.
+
+    "-----------------------------------------------------------------
+    " Determine component completeness
+    "-----------------------------------------------------------------
+    LOOP AT lt_resb INTO ls_resb.
+      CASE ls_resb-postp.
+        WHEN gc_postp_l.
+          lv_has_l = abap_true.
+          IF ls_resb-enmng < ls_resb-bdmng.
+            lv_l_incomplete = abap_true.
+          ELSE.
+            lv_l_complete = abap_true.
+          ENDIF.
+        WHEN gc_postp_n.
+          lv_has_n = abap_true.
+          IF ls_resb-enmng < ls_resb-bdmng.
+            lv_n_incomplete = abap_true.
+          ELSE.
+            lv_n_complete = abap_true.
+          ENDIF.
+      ENDCASE.
+    ENDLOOP.
+
+    "-----------------------------------------------------------------
+    " Ignore if both L and N have no posted and no not-posted
+    "-----------------------------------------------------------------
+    IF lv_has_l IS INITIAL AND lv_has_n IS INITIAL.
+      CONTINUE.
+    ENDIF.
+
+*---------------------------------------------------------------------*
+* HANDLE SET STATUS
+*---------------------------------------------------------------------*
+    IF p_set = abap_true.
+
+      IF lv_kcmp_active = abap_true.
+        CONTINUE. " Skip active KCMP
+      ENDIF.
+
+      "---------------------------------------------------------------
+      " BOTH L AND N EXIST
+      "---------------------------------------------------------------
+      IF lv_has_l = abap_true AND lv_has_n = abap_true.
+
+        IF lv_l_complete = abap_true AND lv_n_complete = abap_true.
+          APPEND ls_order TO lt_keep. "both complete
+        ELSEIF lv_l_complete = abap_true AND lv_n_incomplete = abap_true.
+          IF ( p_reserv = abap_true AND p_preq = abap_false )
+             OR ( p_reserv IS INITIAL AND p_preq IS INITIAL ).
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ELSEIF lv_l_incomplete = abap_true AND lv_n_complete = abap_true.
+          IF ( p_reserv = abap_false AND p_preq = abap_true )
+             OR ( p_reserv IS INITIAL AND p_preq IS INITIAL ).
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ELSEIF lv_l_incomplete = abap_true AND lv_n_incomplete = abap_true.
+          IF p_reserv IS INITIAL AND p_preq IS INITIAL.
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ENDIF.
+
+      "---------------------------------------------------------------
+      " L ONLY
+      "---------------------------------------------------------------
+      ELSEIF lv_has_l = abap_true AND lv_has_n = abap_false.
+
+        IF lv_l_complete = abap_true.
+          IF ( p_reserv = abap_true )
+             OR ( p_reserv IS INITIAL AND p_preq IS INITIAL )
+             OR ( p_reserv = abap_true AND p_preq = abap_true ).
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ELSE.
+          " L incomplete
+          IF p_reserv IS INITIAL AND p_preq IS INITIAL.
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ENDIF.
+
+      "---------------------------------------------------------------
+      " N ONLY
+      "---------------------------------------------------------------
+      ELSEIF lv_has_l = abap_false AND lv_has_n = abap_true.
+
+        IF lv_n_complete = abap_true.
+          IF ( p_preq = abap_true )
+             OR ( p_reserv IS INITIAL AND p_preq IS INITIAL )
+             OR ( p_reserv = abap_true AND p_preq = abap_true ).
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ELSE.
+          " N incomplete
+          IF p_reserv IS INITIAL AND p_preq IS INITIAL.
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ENDIF.
+
+      ENDIF.
+
+      CONTINUE.
+
+*---------------------------------------------------------------------*
+* HANDLE RESET STATUS
+*---------------------------------------------------------------------*
+    ELSEIF p_reset = abap_true.
+
+      IF lv_kcmp_active = abap_false.
+        CONTINUE. " Ignore not active
+      ENDIF.
+
+      "---------------------------------------------------------------
+      " BOTH L AND N EXIST
+      "---------------------------------------------------------------
+      IF lv_has_l = abap_true AND lv_has_n = abap_true.
+
+        IF lv_l_complete = abap_true AND lv_n_complete = abap_true.
+          IF p_reserv IS INITIAL AND p_preq IS INITIAL.
+            APPEND ls_order TO lt_keep. "none checked -> reset
+          ENDIF.
+        ELSEIF lv_l_complete = abap_true AND lv_n_incomplete = abap_true.
+          IF ( p_reserv = abap_true AND p_preq = abap_true )
+             OR ( p_preq = abap_true AND p_reserv IS INITIAL )
+             OR ( p_reserv IS INITIAL AND p_preq IS INITIAL ).
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ELSEIF lv_l_incomplete = abap_true AND lv_n_complete = abap_true.
+          IF ( p_reserv = abap_true AND p_preq = abap_true )
+             OR ( p_preq IS INITIAL AND p_reserv = abap_true )
+             OR ( p_reserv IS INITIAL AND p_preq IS INITIAL ).
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ELSEIF lv_l_incomplete = abap_true AND lv_n_incomplete = abap_true.
+          APPEND ls_order TO lt_keep. "always reset
+        ENDIF.
+
+      "---------------------------------------------------------------
+      " L ONLY
+      "---------------------------------------------------------------
+      ELSEIF lv_has_l = abap_true AND lv_has_n = abap_false.
+
+        IF lv_l_complete = abap_true.
+          IF p_reserv IS INITIAL AND p_preq IS INITIAL.
+            APPEND ls_order TO lt_keep. "none checked
+          ENDIF.
+        ELSE.
+          " L incomplete
+          IF ( p_reserv = abap_true AND p_preq = abap_true )
+             OR ( p_reserv = abap_true AND p_preq IS INITIAL )
+             OR ( p_reserv IS INITIAL AND p_preq IS INITIAL ).
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ENDIF.
+
+      "---------------------------------------------------------------
+      " N ONLY
+      "---------------------------------------------------------------
+      ELSEIF lv_has_l = abap_false AND lv_has_n = abap_true.
+
+        IF lv_n_complete = abap_true.
+          IF p_reserv IS INITIAL AND p_preq IS INITIAL.
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ELSE.
+          " N incomplete
+          IF ( p_reserv = abap_true AND p_preq = abap_true )
+             OR ( p_preq = abap_true AND p_reserv IS INITIAL )
+             OR ( p_reserv IS INITIAL AND p_preq IS INITIAL ).
+            APPEND ls_order TO lt_keep.
+          ENDIF.
+        ENDIF.
+
+      ENDIF.
+
+      CONTINUE.
+
+    ENDIF.
+
+  ENDLOOP.
+
+  gt_orders = lt_keep.
+
+ENDFORM.
+
+
+*---------------------------------------------------------------------*
+* FORM: evaluate_kitting
+*---------------------------------------------------------------------*
+FORM evaluate_kitting.
+
+  DATA: lv_msg         TYPE string,
+        lv_kcmp_active TYPE abap_bool,
+        lv_stat        TYPE jest-stat.
+
+  LOOP AT gt_orders INTO DATA(ls_order).
+
+    CLEAR: lv_kcmp_active, lv_stat.
+
+    "---------------------------------------------------------------
+    " Determine if KCMP is currently active
+    "---------------------------------------------------------------
+    SELECT SINGLE stat
+      INTO @lv_stat
+      FROM jest
+      WHERE objnr = @ls_order-objnr
+        AND inact = @space
+        AND stat  = @gc_estat.
+    IF sy-subrc = 0.
+      lv_kcmp_active = abap_true.
+    ENDIF.
+
+    "---------------------------------------------------------------
+    " Log only actionable entries (gt_orders already filtered)
+    "---------------------------------------------------------------
+    IF p_set = abap_true.
+      " SET mode: these orders are complete and KCMP not active
+      MESSAGE s016 WITH ls_order-aufnr INTO lv_msg. "Ready for KCMP Set
+      APPEND VALUE #(
+        aufnr        = ls_order-aufnr
+        auart        = ls_order-auart
+        iwerk        = ls_order-iwerk
+        erdat        = ls_order-erdat
+        gstrp        = ls_order-gstrp
+        gltrp        = ls_order-gltrp
+        msgtxt       = lv_msg
+        light        = gc_light_green_code
+        kcmp_active  = COND #( WHEN lv_kcmp_active = abap_true THEN 'X' ELSE space )
+      ) TO gt_log.
+
+    ELSEIF p_reset = abap_true.
+      " RESET mode: these orders are KCMP-active + incomplete
+      MESSAGE s015 WITH ls_order-aufnr INTO lv_msg. "Ready for KCMP Reset
+      APPEND VALUE #(
+        aufnr        = ls_order-aufnr
+        auart        = ls_order-auart
+        iwerk        = ls_order-iwerk
+        erdat        = ls_order-erdat
+        gstrp        = ls_order-gstrp
+        gltrp        = ls_order-gltrp
+        msgtxt       = lv_msg
+        light        = gc_light_green_code
+        kcmp_active  = 'X'
+      ) TO gt_log.
+    ENDIF.
+
+  ENDLOOP.
+
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+* FORM: check_authorizations
+*---------------------------------------------------------------------*
+FORM check_authorizations.
+  AUTHORITY-CHECK OBJECT 'C_AFKO_ACT' ID 'PS_ACTVT' FIELD '02'.
+  IF sy-subrc <> 0.
+    CLEAR gs_log.
+    gs_log-msgno = '001'.
+    gs_log-msgid = gc_msgid.
+    gs_log-msgtp = 'E'.
+    gs_log-light = 'R'.
+    gv_user_authorized = abap_false.
+    MESSAGE ID gc_msgid TYPE 'E' NUMBER '001'.
+    PERFORM display_execution_log.
+    EXIT.
+  ENDIF.
+ENDFORM.
+
+*---------------------------------------------------------------------*
+* FORM: update_user_status
+*---------------------------------------------------------------------*
+FORM update_user_status.
+
+  DATA: lv_objnr       TYPE jest-objnr,
+        lv_stat        TYPE jest-stat,
+        lv_kcmp_active TYPE abap_bool,
+        lv_msg         TYPE string,
+        lt_header      TYPE TABLE OF bapi_alm_order_headers_i,
+        lt_status      TYPE TABLE OF bapi_alm_order_usrstat,
+        lt_methods     TYPE TABLE OF bapi_alm_order_method,
+        lt_return      TYPE TABLE OF bapiret2,
+        ls_return      TYPE bapiret2.
+
+  LOOP AT gt_log INTO DATA(ls_log)
+    WHERE light = 'G'.  " Process only ready (green) rows
+
+    CLEAR: lv_objnr, lv_stat, lv_kcmp_active, lv_msg,
+           lt_header, lt_status, lt_methods, lt_return, ls_return.
+
+*--------------------------------------------------------------------*
+* Recheck KCMP active status
+*--------------------------------------------------------------------*
+    SELECT SINGLE objnr INTO lv_objnr FROM aufk WHERE aufnr = ls_log-aufnr.
+    IF sy-subrc = 0.
+      SELECT SINGLE stat
+        INTO lv_stat
+        FROM jest
+        WHERE objnr = lv_objnr
+          AND inact = space
+          AND stat  = gc_estat.
+      lv_kcmp_active = xsdbool( sy-subrc = 0 ).
+    ENDIF.
+
+*--------------------------------------------------------------------*
+* Validation
+*--------------------------------------------------------------------*
+    IF p_set = abap_true AND lv_kcmp_active = abap_true.
+      MESSAGE ID gc_msgid TYPE 'I' NUMBER '018' WITH ls_log-aufnr INTO ls_log-msgtxt.
+      ls_log-msgid  = gc_msgid.
+      ls_log-msgno  = '018'.
+      ls_log-msgtp = 'I'.
+      ls_log-light  = 'O'.
+      MODIFY gt_log FROM ls_log.
+      CONTINUE.
+    ENDIF.
+
+    IF p_reset = abap_true AND lv_kcmp_active = abap_false.
+      MESSAGE ID gc_msgid TYPE 'I' NUMBER '019' WITH ls_log-aufnr INTO ls_log-msgtxt.
+      ls_log-msgid  = gc_msgid.
+      ls_log-msgno  = '019'.
+      ls_log-msgtp = 'I'.
+      ls_log-light  = 'O'.
+      MODIFY gt_log FROM ls_log.
+      CONTINUE.
+    ENDIF.
+
+*--------------------------------------------------------------------*
+* Authorization check
+*--------------------------------------------------------------------*
+    AUTHORITY-CHECK OBJECT 'I_IWERK' ID 'IWERK' FIELD ls_log-iwerk.
+    IF sy-subrc <> 0.
+      MESSAGE ID gc_msgid TYPE 'E' NUMBER '002' WITH ls_log-iwerk INTO ls_log-msgtxt.
+      ls_log-msgid  = gc_msgid.
+      ls_log-msgno  = '002'.
+      ls_log-msgtp = 'E'.
+      ls_log-light  = 'R'.
+      MODIFY gt_log FROM ls_log.
+      CONTINUE.
+    ENDIF.
+
+*--------------------------------------------------------------------*
+* Build BAPI input data
+*--------------------------------------------------------------------*
+    APPEND VALUE #( orderid = ls_log-aufnr ) TO lt_header.
+
+    IF p_reset = abap_true.
+      APPEND VALUE #( user_st_text = p_estat inactive = 'X' langu = p_spras ) TO lt_status.
+    ELSE.
+      APPEND VALUE #( user_st_text = p_estat langu = p_spras ) TO lt_status.
+    ENDIF.
+
+    APPEND VALUE #( refnumber = '00001' objecttype = 'HEADER'
+                    method = 'CHANGE' objectkey = ls_log-aufnr ) TO lt_methods.
+    APPEND VALUE #( refnumber = '00001' objecttype = 'USERSTATUS'
+                    method = 'CHANGE' objectkey = ls_log-aufnr ) TO lt_methods.
+    APPEND VALUE #( refnumber = '00003' objecttype = 'ORDER'
+                    method = 'SAVE' objectkey = ls_log-aufnr ) TO lt_methods.
+
+*--------------------------------------------------------------------*
+* Execute BAPI
+*--------------------------------------------------------------------*
+    CALL FUNCTION 'BAPI_ALM_ORDER_MAINTAIN'
+      TABLES
+        it_header     = lt_header
+        it_methods    = lt_methods
+        it_userstatus = lt_status
+        return        = lt_return.
+
+    READ TABLE lt_return INTO ls_return WITH KEY type = 'E'.
+    IF sy-subrc = 0.
+      " Error case
+      ls_log-msgtxt  = ls_return-message.
+      ls_log-msgid   = ls_return-id.
+      ls_log-msgno   = ls_return-number.
+      ls_log-msgtp  = ls_return-type.
+      ls_log-light   = 'R'.
+      CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+    ELSE.
+      " Success case
+      IF p_reset = abap_true.
+        MESSAGE ID gc_msgid TYPE 'I' NUMBER '004' WITH p_estat INTO ls_log-msgtxt.
+        ls_log-msgid  = gc_msgid.
+        ls_log-msgno  = '004'.
+        ls_log-msgtp = 'I'.
+        CLEAR ls_log-kcmp_active.
+      ELSE.
+        MESSAGE ID gc_msgid TYPE 'I' NUMBER '003' WITH p_estat INTO ls_log-msgtxt.
+        ls_log-msgid  = gc_msgid.
+        ls_log-msgno  = '003'.
+        ls_log-msgtp = 'I'.
+        ls_log-kcmp_active = 'X'.
+      ENDIF.
+      ls_log-light = 'G'.
+      CALL FUNCTION 'BAPI_TRANSACTION_COMMIT' EXPORTING wait = 'X'.
+    ENDIF.
+
+*--------------------------------------------------------------------*
+* Release locks and update ALV log
+*--------------------------------------------------------------------*
+    PERFORM release_locks USING ls_log-aufnr.
+    MODIFY gt_log FROM ls_log.
+
+  ENDLOOP.
+
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+* FORM: display_execution_log
+*---------------------------------------------------------------------*
+FORM display_execution_log.
+
+  DATA: lo_alv  TYPE REF TO cl_salv_table,
+        lo_cols TYPE REF TO cl_salv_columns_table,
+        lo_col  TYPE REF TO cl_salv_column,
+        lx_msg  TYPE REF TO cx_salv_msg.
+
+  "---------------------------------------------------------------
+  " Exit if no log entries
+  "---------------------------------------------------------------
+  IF gt_log IS INITIAL.
+    MESSAGE s006(za2r_kcmpmsg).
+    STOP.
+  ENDIF.
+
+  "---------------------------------------------------------------
+  " Remove ignored ('O') rows (non-actionable)
+  "---------------------------------------------------------------
+  DELETE gt_log WHERE light = icon_led_inactive OR light = 'O'.
+
+  IF gt_log IS INITIAL.
+    MESSAGE s006(za2r_kcmpmsg).
+    STOP.
+  ENDIF.
+
+  "---------------------------------------------------------------
+  " Map traffic light indicator codes
+  "---------------------------------------------------------------
+  LOOP AT gt_log ASSIGNING FIELD-SYMBOL(<fs_log>).
+    CASE <fs_log>-light.
+      WHEN 'G' OR icon_led_green.
+        <fs_log>-light = icon_led_green.
+      WHEN 'R' OR icon_led_red.
+        <fs_log>-light = icon_led_red.
+      WHEN OTHERS.
+        <fs_log>-light = icon_led_inactive.
+    ENDCASE.
+  ENDLOOP.
+
+  "---------------------------------------------------------------
+  " Build and display ALV
+  "---------------------------------------------------------------
+  TRY.
+      cl_salv_table=>factory(
+        IMPORTING
+          r_salv_table = lo_alv
+        CHANGING
+          t_table      = gt_log ).
+    CATCH cx_salv_msg INTO lx_msg.
+      MESSAGE lx_msg->get_text( ) TYPE 'I'.
+      RETURN.
+  ENDTRY.
+
+  lo_cols = lo_alv->get_columns( ).
+  lo_cols->set_optimize( abap_true ).
+
+  "---------------------------------------------------------------
+  " Define readable column headers
+  "---------------------------------------------------------------
+  TRY.
+      lo_col = lo_cols->get_column( 'AUFNR' ).
+      lo_col->set_short_text( 'Order' ).
+      lo_col->set_medium_text( 'Order No.' ).
+      lo_col->set_long_text( 'Order Number' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'AUART' ).
+      lo_col->set_short_text( 'Type' ).
+      lo_col->set_medium_text( 'Order Type' ).
+      lo_col->set_long_text( 'Order Type' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'IWERK' ).
+      lo_col->set_short_text( 'Plant' ).
+      lo_col->set_medium_text( 'Plant' ).
+      lo_col->set_long_text( 'Planning Plant' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'ERDAT' ).
+      lo_col->set_short_text( 'Created' ).
+      lo_col->set_medium_text( 'Created On' ).
+      lo_col->set_long_text( 'Created On' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'GSTRP' ).
+      lo_col->set_short_text( 'Start' ).
+      lo_col->set_medium_text( 'Basic Start' ).
+      lo_col->set_long_text( 'Basic Start Date' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'GLTRP' ).
+      lo_col->set_short_text( 'Finish' ).
+      lo_col->set_medium_text( 'Basic Finish' ).
+      lo_col->set_long_text( 'Basic Finish Date' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'MSGTP' ).
+      lo_col->set_short_text( 'Msg Type' ).
+      lo_col->set_medium_text( 'Msg Type' ).
+      lo_col->set_long_text( 'Message Type' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'MSGID' ).
+      lo_col->set_short_text( 'Msg ID' ).
+      lo_col->set_medium_text( 'Msg ID' ).
+      lo_col->set_long_text( 'Message ID' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'MSGNO' ).
+      lo_col->set_short_text( 'Msg No.' ).
+      lo_col->set_medium_text( 'Msg No.' ).
+      lo_col->set_long_text( 'Message Number' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'MSGTXT' ).
+      lo_col->set_short_text( 'Msg Text' ).
+      lo_col->set_medium_text( 'Message Text' ).
+      lo_col->set_long_text( 'Message Text' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  TRY.
+      lo_col = lo_cols->get_column( 'LIGHT' ).
+      lo_col->set_short_text( 'RC' ).
+      lo_col->set_medium_text( 'RC' ).
+      lo_col->set_long_text( 'Return Code' ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  "---------------------------------------------------------------
+  " Hide technical/internal fields
+  "---------------------------------------------------------------
+  TRY.
+      lo_col = lo_cols->get_column( 'KCMP_ACTIVE' ).
+      lo_col->set_visible( abap_false ).
+    CATCH cx_salv_not_found.
+  ENDTRY.
+
+  "---------------------------------------------------------------
+  " Enable standard ALV functions
+  "---------------------------------------------------------------
+  lo_alv->get_functions( )->set_all( abap_true ).
+
+  lo_alv->get_display_settings( )->set_list_header( 'Execution Log – KCMP Status Update' ).
+  lo_alv->get_display_settings( )->set_striped_pattern( abap_true ).
+
+  "---------------------------------------------------------------
+  " Display the ALV
+  "---------------------------------------------------------------
+  lo_alv->display( ).
+
+ENDFORM.
+
+
+
+*---------------------------------------------------------------------*
+* FORM: release_locks
+*---------------------------------------------------------------------*
+FORM release_locks USING p_aufnr TYPE aufk-aufnr.
+
+  DATA: lv_aufnr    TYPE aufk-aufnr,
+        lv_rsnum    TYPE resb-rsnum,
+        lv_prueflos TYPE qals-prueflos,
+        lv_qmnum    TYPE qmel-qmnum,
+        lv_objnr    TYPE jest-objnr,
+        lt_fms      TYPE TABLE OF funcname,
+        lv_fm       TYPE funcname,
+        lv_exists   TYPE funcname.
+
+  CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+    EXPORTING
+      input  = p_aufnr
+    IMPORTING
+      output = lv_aufnr.
+
+  SELECT SINGLE rsnum FROM resb INTO @lv_rsnum WHERE aufnr = @lv_aufnr AND xloek = @space.
+  IF sy-subrc <> 0. CLEAR lv_rsnum. ENDIF.
+
+  SELECT SINGLE prueflos FROM qals INTO @lv_prueflos WHERE aufnr = @lv_aufnr.
+  IF sy-subrc <> 0. CLEAR lv_prueflos. ENDIF.
+
+  SELECT SINGLE qmnum FROM qmel INTO @lv_qmnum WHERE aufnr = @lv_aufnr.
+  IF sy-subrc <> 0. CLEAR lv_qmnum. ENDIF.
+
+  CONCATENATE 'OR' lv_aufnr INTO lv_objnr.
+
+  lt_fms = VALUE #(
+    ( 'DEQUEUE_EAUFK' )
+    ( 'DEQUEUE_EAFKO' )
+    ( 'DEQUEUE_EAFVC' )
+    ( 'DEQUEUE_EEQUI' )
+    ( 'DEQUEUE_EIFLOT' )
+    ( 'DEQUEUE_ERESB' )
+    ( 'DEQUEUE_ERKPF' )
+    ( 'DEQUEUE_EQALS' )
+    ( 'DEQUEUE_EQMEL' )
+  ).
+
+  LOOP AT lt_fms INTO lv_fm.
+    SELECT SINGLE funcname INTO lv_exists FROM tfdir WHERE funcname = lv_fm.
+    IF sy-subrc <> 0. CONTINUE. ENDIF.
+
+    TRY.
+        CASE lv_fm.
+          WHEN 'DEQUEUE_EAUFK' OR 'DEQUEUE_EAFKO'.
+            CALL FUNCTION lv_fm EXPORTING aufnr = lv_aufnr.
+          WHEN 'DEQUEUE_EAFVC'.
+            CALL FUNCTION lv_fm EXPORTING objnr = lv_objnr.
+          WHEN 'DEQUEUE_ERESB' OR 'DEQUEUE_ERKPF'.
+            IF lv_rsnum IS NOT INITIAL.
+              CALL FUNCTION lv_fm EXPORTING rsnum = lv_rsnum.
+            ENDIF.
+          WHEN 'DEQUEUE_EQALS'.
+            IF lv_prueflos IS NOT INITIAL.
+              CALL FUNCTION lv_fm EXPORTING prueflos = lv_prueflos.
+            ENDIF.
+          WHEN 'DEQUEUE_EQMEL'.
+            IF lv_qmnum IS NOT INITIAL.
+              CALL FUNCTION lv_fm EXPORTING qmnum = lv_qmnum.
+            ENDIF.
+        ENDCASE.
+      CATCH cx_root INTO DATA(lx_root).
+        CONTINUE.
+    ENDTRY.
+  ENDLOOP.
+
+  CALL FUNCTION 'DEQUEUE_ALL'.
+
+ENDFORM.
