@@ -10,19 +10,27 @@ FORM f_check_status USING ps_order TYPE viaufkst.
         lv_locked_active    TYPE abap_bool VALUE abap_false,
         lv_cmxs_active      TYPE abap_bool VALUE abap_false,
         lv_prev_locked      TYPE abap_bool VALUE abap_false,
-        lv_teco_cancelled   TYPE abap_bool VALUE abap_false, " <<< FIX
-        lv_unlocked         TYPE abap_bool VALUE abap_false, " <<< FIX
+        lv_teco_cancelled   TYPE abap_bool VALUE abap_false,
+        lv_unlocked         TYPE abap_bool VALUE abap_false,
         lv_sts_date         TYPE udate,
         lv_sts_time         TYPE utime,
         lv_chg_date         TYPE udate,
         lv_chg_time         TYPE utime,
-        lv_input_ts         TYPE char14,
         lv_jcds_ts          TYPE char14,
-        lv_cdhdr_ts         TYPE char14,
-        lv_dummy            TYPE jcds-objnr.                 " <<< FIX
+        lv_cdhdr_ts         TYPE char14.
 
 *---------------------------------------------------------------------*
-*  Classification (INTERFACE = CMX)  (UNCHANGED)
+* Duplicate protection
+*---------------------------------------------------------------------*
+  READ TABLE gt_output TRANSPORTING NO FIELDS
+    WITH KEY MaintenanceOrder = ps_order-aufnr
+    BINARY SEARCH.
+  IF sy-subrc = 0.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Classification (INTERFACE = CMX)
 *---------------------------------------------------------------------*
   CLEAR lv_obj.
   IF ps_order-equnr IS NOT INITIAL.
@@ -37,13 +45,14 @@ FORM f_check_status USING ps_order TYPE viaufkst.
 
   SELECT SINGLE atwrt INTO @lv_value
     FROM ausp
-    WHERE objek = @lv_obj AND atinn = @gv_atinn.
+    WHERE objek = @lv_obj
+      AND atinn = @gv_atinn.
   IF sy-subrc <> 0 OR lv_value <> 'CMX'.
     RETURN.
   ENDIF.
 
 *---------------------------------------------------------------------*
-*  Detect current active statuses (UNCHANGED)
+* Active statuses (JEST)
 *---------------------------------------------------------------------*
   SELECT SINGLE stat FROM jest INTO @lv_stat
     WHERE objnr = @ps_order-objnr AND stat = 'I0002' AND inact = ''.
@@ -57,47 +66,37 @@ FORM f_check_status USING ps_order TYPE viaufkst.
     WHERE objnr = @ps_order-objnr AND stat = 'I0043' AND inact = ''.
   IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
 
-*---------------------------------------------------------------------*
-*  CMXS CHECK — WRONG STATUS FIXED
-*---------------------------------------------------------------------*
   SELECT SINGLE stat FROM jest INTO @lv_stat
-    WHERE objnr = @ps_order-objnr
-      AND stat  = 'E0014'      " <<< FIX (CMXS)
-      AND inact = ''.
+    WHERE objnr = @ps_order-objnr AND stat = 'E0010' AND inact = ''.
   IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
 
 *---------------------------------------------------------------------*
-*  Detect TECO CANCELLED  <<< FIX
+* Detect TECO cancelled & Unlock (JCDS, INACT = 'X')
 *---------------------------------------------------------------------*
-  SELECT SINGLE objnr INTO @lv_dummy
-    FROM jcds
+  SELECT SINGLE objnr FROM jcds
     WHERE objnr = @ps_order-objnr
       AND stat  = 'I0045'
       AND inact = 'X'
-      AND ( ( udate > @so_date-low )
-         OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+      AND ( udate > @so_date-low
+         OR ( udate = @so_date-low AND utime > @so_time-low ) ).
   IF sy-subrc = 0.
     lv_teco_cancelled = abap_true.
   ENDIF.
 
-*---------------------------------------------------------------------*
-*  Detect UNLOCK <<< FIX
-*---------------------------------------------------------------------*
-  SELECT SINGLE objnr INTO @lv_dummy
-    FROM jcds
+  SELECT SINGLE objnr FROM jcds
     WHERE objnr = @ps_order-objnr
       AND stat  = 'I0043'
       AND inact = 'X'
-      AND ( ( udate > @so_date-low )
-         OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+      AND ( udate > @so_date-low
+         OR ( udate = @so_date-low AND utime > @so_time-low ) ).
   IF sy-subrc = 0.
     lv_unlocked = abap_true.
+    lv_prev_locked = abap_true.
   ENDIF.
 
 *---------------------------------------------------------------------*
-*   Date-Time Range filtering (UNCHANGED)
+* CDHDR change detection
 *---------------------------------------------------------------------*
-  CONCATENATE so_date-low so_time-low INTO lv_input_ts.
   CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
 
   SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
@@ -105,7 +104,7 @@ FORM f_check_status USING ps_order TYPE viaufkst.
     FROM cdhdr
     WHERE objectclas = 'ORDER'
       AND objectid   = @lv_objid
-      AND ( ( udate > @so_date-low )
+      AND ( udate > @so_date-low
          OR ( udate = @so_date-low AND utime > @so_time-low ) ).
 
   IF lv_chg_date IS NOT INITIAL.
@@ -113,86 +112,56 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   ENDIF.
 
 *---------------------------------------------------------------------*
-*  SKIP ONLY IF NO CHANGE AND NOT CANCEL/UNLOCK <<< FIX
+* FINAL SKIP RULE (FIXED)
 *---------------------------------------------------------------------*
-  IF lv_cdhdr_ts IS INITIAL
+  IF lv_cdhdr_ts       IS INITIAL
      AND lv_teco_cancelled = abap_false
-     AND lv_unlocked       = abap_false.
+     AND lv_unlocked       = abap_false
+     AND lv_cmxs_active    = abap_true.
     RETURN.
   ENDIF.
 
 *---------------------------------------------------------------------*
-*  DUPLICATE CHECK MOVED HERE <<< FIX
-*---------------------------------------------------------------------*
-  READ TABLE gt_output TRANSPORTING NO FIELDS
-    WITH KEY MaintenanceOrder = ps_order-aufnr
-    BINARY SEARCH.
-  IF sy-subrc = 0.
-    RETURN.
-  ENDIF.
-
-*---------------------------------------------------------------------*
-*   Get operation (UNCHANGED)
+* Get operation
 *---------------------------------------------------------------------*
   PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
 
 *---------------------------------------------------------------------*
-*   STATUS HANDLING (YOUR MESSAGES KEPT)
+* LOCKED
 *---------------------------------------------------------------------*
-
-* 1. LOCKED
   IF lv_locked_active = abap_true.
     lv_stat = 'I0043'.
-
-    IF lv_cmxs_active = abap_true.
-      PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-      gs_output-msg = 'Locked order with CMXS – send to CMX (skip BAPI)'.
-      APPEND gs_output TO gt_output.
-    ELSE.
-      gs_output-msg = 'Locked order without CMXS – skip both BAPI and CMX'.
-      PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-      APPEND gs_output TO gt_output.
-    ENDIF.
+    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+    gs_output-msg = 'Locked order – send to CMX'.
+    APPEND gs_output TO gt_output.
+    SORT gt_output BY MaintenanceOrder.
     RETURN.
   ENDIF.
 
-* 2. TECO
+*---------------------------------------------------------------------*
+* TECO
+*---------------------------------------------------------------------*
   IF lv_teco_active = abap_true.
     lv_stat = 'I0045'.
     PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-    gs_output-msg = 'TECO – send to CMX only (skip BAPI)'.
+    gs_output-msg = 'TECO – send to CMX only'.
     APPEND gs_output TO gt_output.
     SORT gt_output BY MaintenanceOrder.
     RETURN.
   ENDIF.
 
-* 3. TECO CANCELLED / UNLOCKED → REL <<< FIX
-  IF ( lv_teco_cancelled = abap_true OR lv_unlocked = abap_true )
-     AND lv_rel_active = abap_true.
-    lv_stat = 'I0002'.
-    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-    gs_output-msg = 'Unlocked REL with CMXS – send to CMX only'.
-    APPEND gs_output TO gt_output.
-    SORT gt_output BY MaintenanceOrder.
-    RETURN.
-  ENDIF.
-
-* 4. NORMAL REL (UNCHANGED)
+*---------------------------------------------------------------------*
+* REL (normal / unlock)
+*---------------------------------------------------------------------*
   IF lv_rel_active = abap_true.
     lv_stat = 'I0002'.
 
-    IF lv_prev_locked = abap_true.
-      IF lv_cmxs_active = abap_true.
-        gs_output-msg = 'Unlocked REL with CMXS – send to CMX only'.
-      ELSE.
-        gs_output-msg = 'Unlocked REL without CMXS – send to BAPI and CMX'.
-      ENDIF.
+    IF lv_prev_locked = abap_true OR lv_teco_cancelled = abap_true.
+      gs_output-msg = 'REL after unlock / TECO cancel – resend to CMX'.
+    ELSEIF lv_cmxs_active = abap_true.
+      gs_output-msg = 'REL with CMXS – send to CMX only'.
     ELSE.
-      IF lv_cmxs_active = abap_true.
-        gs_output-msg = 'REL with CMXS – send to CMX only'.
-      ELSE.
-        gs_output-msg = 'REL – send to BAPI and CMX'.
-      ENDIF.
+      gs_output-msg = 'REL – send to BAPI and CMX'.
     ENDIF.
 
     PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
