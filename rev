@@ -108,22 +108,6 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   ENDIF.
 
 *---------------------------------------------------------------------*
-*   DEBUG: Remove after testing
-*---------------------------------------------------------------------*
-  IF sy-batch IS INITIAL.
-    WRITE: / 'Order:', ps_order-aufnr.
-    WRITE: / '  REL Active:', lv_rel_active.
-    WRITE: / '  TECO Active:', lv_teco_active.
-    WRITE: / '  LOCKED Active:', lv_locked_active.
-    WRITE: / '  TECO Cancelled:', lv_teco_cancelled.
-    WRITE: / '  TECO Rev Date/Time:', lv_teco_rev_date, lv_teco_rev_time.
-    WRITE: / '  Search From:', so_date-low, so_time-low.
-    WRITE: / '  JCDS TS:', lv_jcds_ts.
-    WRITE: / '  CDHDR TS:', lv_cdhdr_ts.
-    WRITE: / '---'.
-  ENDIF.
-
-*---------------------------------------------------------------------*
 *   Date-Time Range filtering - FIXED to detect ALL status changes
 *---------------------------------------------------------------------*
   CONCATENATE so_date-low so_time-low INTO lv_input_ts.
