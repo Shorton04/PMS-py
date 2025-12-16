@@ -1,23 +1,22 @@
 FORM f_check_status USING ps_order TYPE viaufkst.
 
-  DATA: lv_obj              TYPE cuobj,
-        lv_value            TYPE atwrt,
-        lv_stat             TYPE jest-stat,
-        lv_vornr            TYPE vornr,
-        lv_objid            TYPE c LENGTH 20,
-        lv_rel_active       TYPE abap_bool VALUE abap_false,
-        lv_teco_active      TYPE abap_bool VALUE abap_false,
-        lv_locked_active    TYPE abap_bool VALUE abap_false,
-        lv_cmxs_active      TYPE abap_bool VALUE abap_false,
-        lv_prev_locked      TYPE abap_bool VALUE abap_false,
-        lv_status_cancelled TYPE abap_bool VALUE abap_false,
-        lv_dummy            TYPE jcds-objnr,
-        lv_sts_date         TYPE udate,
-        lv_sts_time         TYPE utime,
-        lv_chg_date         TYPE udate,
-        lv_chg_time         TYPE utime,
-        lv_jcds_ts          TYPE char14,
-        lv_cdhdr_ts         TYPE char14.
+  DATA: lv_obj        TYPE cuobj,
+        lv_value      TYPE atwrt,
+        lv_stat       TYPE jest-stat,
+        lv_vornr      TYPE vornr,
+        lv_objid      TYPE c LENGTH 20,
+
+        lv_rel_active    TYPE abap_bool VALUE abap_false,
+        lv_teco_active   TYPE abap_bool VALUE abap_false,
+        lv_locked_active TYPE abap_bool VALUE abap_false,
+        lv_unlocked      TYPE abap_bool VALUE abap_false,
+
+        lv_cmxs_active   TYPE abap_bool VALUE abap_false,
+        lv_dummy         TYPE jcds-objnr,
+
+        lv_chg_date TYPE udate,
+        lv_chg_time TYPE utime,
+        lv_cdhdr_ts TYPE char14.
 
 *---------------------------------------------------------------------*
 * Classification (INTERFACE = CMX)
@@ -35,13 +34,27 @@ FORM f_check_status USING ps_order TYPE viaufkst.
 
   SELECT SINGLE atwrt INTO @lv_value
     FROM ausp
-    WHERE objek = @lv_obj AND atinn = @gv_atinn.
+    WHERE objek = @lv_obj
+      AND atinn = @gv_atinn.
   IF sy-subrc <> 0 OR lv_value <> 'CMX'.
     RETURN.
   ENDIF.
 
 *---------------------------------------------------------------------*
-* Detect current active statuses
+* EXCLUDE: CMXC (E0010) active → do not process (FDE rule)
+*---------------------------------------------------------------------*
+  SELECT SINGLE stat
+    INTO @lv_stat
+    FROM jest
+    WHERE objnr = @ps_order-objnr
+      AND stat  = 'E0010'
+      AND inact = ''.
+  IF sy-subrc = 0.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Detect current active system statuses
 *---------------------------------------------------------------------*
   SELECT SINGLE stat FROM jest INTO @lv_stat
     WHERE objnr = @ps_order-objnr AND stat = 'I0002' AND inact = ''.
@@ -55,43 +68,35 @@ FORM f_check_status USING ps_order TYPE viaufkst.
     WHERE objnr = @ps_order-objnr AND stat = 'I0043' AND inact = ''.
   IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
 
-* CMXS = E0014
+*---------------------------------------------------------------------*
+* CMXS (E0014) – tracking only
+*---------------------------------------------------------------------*
   SELECT SINGLE stat FROM jest INTO @lv_stat
     WHERE objnr = @ps_order-objnr AND stat = 'E0014' AND inact = ''.
   IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
 
 *---------------------------------------------------------------------*
-* Previously locked?
+* Detect UNLOCK (I0043 became INACT = X inside time window)
 *---------------------------------------------------------------------*
   SELECT SINGLE objnr
     INTO @lv_dummy
     FROM jcds
     WHERE objnr = @ps_order-objnr
       AND stat  = 'I0043'
-      AND inact = 'X'.
-  IF sy-subrc = 0.
-    lv_prev_locked = abap_true.
-  ENDIF.
-
-*---------------------------------------------------------------------*
-* Delta detection (INCLUDING cancel / unlock)
-*---------------------------------------------------------------------*
-  SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
-    INTO ( @lv_sts_date, @lv_sts_time )
-    FROM jcds
-    WHERE objnr = @ps_order-objnr
-      AND stat IN ( 'I0043', 'I0045', 'I0002' )
+      AND inact = 'X'
       AND (
             ( udate >  @so_date-low OR
              ( udate = @so_date-low AND utime >= @so_time-low ) )
         AND ( udate <  @so_date-high OR
              ( udate = @so_date-high AND utime <= @so_time-high ) )
           ).
-
-  IF lv_sts_date IS NOT INITIAL.
-    CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
+  IF sy-subrc = 0.
+    lv_unlocked = abap_true.
   ENDIF.
 
+*---------------------------------------------------------------------*
+* Delta check – CDHDR is authoritative (FDE)
+*---------------------------------------------------------------------*
   CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
 
   SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
@@ -110,32 +115,16 @@ FORM f_check_status USING ps_order TYPE viaufkst.
     CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
   ENDIF.
 
-* Cancel / unlock detection
-  SELECT SINGLE objnr
-    INTO @lv_dummy
-    FROM jcds
-    WHERE objnr = @ps_order-objnr
-      AND inact = 'X'
-      AND stat IN ( 'I0043', 'I0045' )
-      AND (
-            ( udate >  @so_date-low OR
-             ( udate = @so_date-low AND utime >= @so_time-low ) )
-        AND ( udate <  @so_date-high OR
-             ( udate = @so_date-high AND utime <= @so_time-high ) )
-          ).
-
-  IF sy-subrc = 0.
-    lv_status_cancelled = abap_true.
-  ENDIF.
-
-  IF lv_jcds_ts IS INITIAL
-     AND lv_cdhdr_ts IS INITIAL
-     AND lv_status_cancelled = abap_false.
+*---------------------------------------------------------------------*
+* Exit if no delta AND not unlocked
+*---------------------------------------------------------------------*
+  IF lv_cdhdr_ts IS INITIAL
+     AND lv_unlocked = abap_false.
     RETURN.
   ENDIF.
 
 *---------------------------------------------------------------------*
-* Duplicate protection (MOVED HERE)
+* Duplicate protection – AFTER delta (FDE rule)
 *---------------------------------------------------------------------*
   READ TABLE gt_output TRANSPORTING NO FIELDS
     WITH KEY MaintenanceOrder = ps_order-aufnr
@@ -145,13 +134,51 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   ENDIF.
 
 *---------------------------------------------------------------------*
-* Get operation
+* Get first operation
 *---------------------------------------------------------------------*
   PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
 
 *---------------------------------------------------------------------*
-* Existing status handling (unchanged)
+* Status handling (FDE cases)
 *---------------------------------------------------------------------*
-  " ... your LOCKED / TECO / REL logic remains exactly the same ...
+
+* Case: LOCKED
+  IF lv_locked_active = abap_true.
+    lv_stat = 'I0043'.
+    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+    gs_output-msg = 'Locked order – send to CMX'.
+    APPEND gs_output TO gt_output.
+    SORT gt_output BY MaintenanceOrder.
+    RETURN.
+  ENDIF.
+
+* Case: TECO
+  IF lv_teco_active = abap_true.
+    lv_stat = 'I0045'.
+    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+    gs_output-msg = 'TECO – send to CMX'.
+    APPEND gs_output TO gt_output.
+    SORT gt_output BY MaintenanceOrder.
+    RETURN.
+  ENDIF.
+
+* Case: UNLOCK → REL
+  IF lv_unlocked = abap_true AND lv_rel_active = abap_true.
+    lv_stat = 'I0002'.
+    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+    gs_output-msg = 'Unlocked order – send REL to CMX'.
+    APPEND gs_output TO gt_output.
+    SORT gt_output BY MaintenanceOrder.
+    RETURN.
+  ENDIF.
+
+* Case: Normal REL
+  IF lv_rel_active = abap_true.
+    lv_stat = 'I0002'.
+    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+    gs_output-msg = 'REL – send to CMX'.
+    APPEND gs_output TO gt_output.
+    SORT gt_output BY MaintenanceOrder.
+  ENDIF.
 
 ENDFORM.
