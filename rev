@@ -1,13 +1,133 @@
-IF lv_jcds_ts IS INITIAL
-   AND lv_cdhdr_ts IS INITIAL
-   AND lv_status_cancelled = abap_false.
-  RETURN.
-ENDIF.
+  DATA: lv_obj              TYPE cuobj,
+        lv_value            TYPE atwrt,
+        lv_stat             TYPE jest-stat,
+        lv_vornr            TYPE vornr,
+        lv_objid            TYPE c LENGTH 20,
+        lv_rel_active       TYPE abap_bool VALUE abap_false,
+        lv_teco_active      TYPE abap_bool VALUE abap_false,
+        lv_locked_active    TYPE abap_bool VALUE abap_false,
+        lv_cmxs_active      TYPE abap_bool VALUE abap_false,
+        lv_prev_locked      TYPE abap_bool VALUE abap_false,
+        lv_status_cancelled TYPE abap_bool VALUE abap_false,
+        lv_dummy            TYPE jcds-objnr,
+        lv_sts_date         TYPE udate,
+        lv_sts_time         TYPE utime,
+        lv_chg_date         TYPE udate,
+        lv_chg_time         TYPE utime,
+        lv_jcds_ts          TYPE char14,
+        lv_cdhdr_ts         TYPE char14.
 
-" NOW safe to prevent duplicates
-READ TABLE gt_output TRANSPORTING NO FIELDS
-  WITH KEY MaintenanceOrder = ps_order-aufnr
-  BINARY SEARCH.
-IF sy-subrc = 0.
-  RETURN.
-ENDIF.
+*---------------------------------------------------------------------*
+* Classification (INTERFACE = CMX)
+*---------------------------------------------------------------------*
+  CLEAR lv_obj.
+  IF ps_order-equnr IS NOT INITIAL.
+    SELECT SINGLE cuobj INTO @lv_obj FROM inob WHERE objek = @ps_order-equnr.
+  ENDIF.
+  IF lv_obj IS INITIAL AND ps_order-tplnr IS NOT INITIAL.
+    SELECT SINGLE cuobj INTO @lv_obj FROM inob WHERE objek = @ps_order-tplnr.
+  ENDIF.
+  IF lv_obj IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT SINGLE atwrt INTO @lv_value
+    FROM ausp
+    WHERE objek = @lv_obj
+      AND atinn = @gv_atinn.
+  IF sy-subrc <> 0 OR lv_value <> 'CMX'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Detect current active statuses
+*---------------------------------------------------------------------*
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+    WHERE objnr = @ps_order-objnr AND stat = 'I0002' AND inact = ''.
+  IF sy-subrc = 0. lv_rel_active = abap_true. ENDIF.
+
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+    WHERE objnr = @ps_order-objnr AND stat = 'I0045' AND inact = ''.
+  IF sy-subrc = 0. lv_teco_active = abap_true. ENDIF.
+
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+    WHERE objnr = @ps_order-objnr AND stat = 'I0043' AND inact = ''.
+  IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
+
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+    WHERE objnr = @ps_order-objnr AND stat = 'E0014' AND inact = ''.
+  IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
+
+*---------------------------------------------------------------------*
+* Check if previously locked
+*---------------------------------------------------------------------*
+  SELECT SINGLE * FROM jcds
+    WHERE objnr = @ps_order-objnr
+      AND stat  = 'I0043'
+      AND inact = 'X'
+    INTO @DATA(ls_prev_lkd).
+  IF sy-subrc = 0.
+    lv_prev_locked = abap_true.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Delta detection (JCDS / CDHDR / Cancel-Unlock)
+*---------------------------------------------------------------------*
+  SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+    INTO ( @lv_sts_date, @lv_sts_time )
+    FROM jcds
+    WHERE objnr = @ps_order-objnr
+      AND stat IN ( 'I0043', 'I0045', 'I0002' )
+      AND ( udate > @so_date-low
+         OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+
+  IF lv_sts_date IS NOT INITIAL.
+    CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
+  ENDIF.
+
+  CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
+
+  SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+    INTO ( @lv_chg_date, @lv_chg_time )
+    FROM cdhdr
+    WHERE objectclas = 'ORDER'
+      AND objectid   = @lv_objid
+      AND ( udate > @so_date-low
+         OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+
+  IF lv_chg_date IS NOT INITIAL.
+    CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
+  ENDIF.
+
+* Detect cancelled / unlocked
+  SELECT SINGLE objnr
+    INTO @lv_dummy
+    FROM jcds
+    WHERE objnr = @ps_order-objnr
+      AND inact = 'X'
+      AND stat IN ( 'I0043', 'I0045' )
+      AND ( udate > @so_date-low
+         OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+
+  IF sy-subrc = 0.
+    lv_status_cancelled = abap_true.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Exit if no delta
+*---------------------------------------------------------------------*
+  IF lv_jcds_ts IS INITIAL
+     AND lv_cdhdr_ts IS INITIAL
+     AND lv_status_cancelled = abap_false.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Duplicate protection (MOVED HERE — FIX)
+*---------------------------------------------------------------------*
+  READ TABLE gt_output TRANSPORTING NO FIELDS
+    WITH KEY MaintenanceOrder = ps_order-aufnr
+    BINARY SEARCH.
+  IF sy-subrc = 0.
+    RETURN.
+  ENDIF
