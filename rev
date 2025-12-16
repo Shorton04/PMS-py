@@ -1,26 +1,27 @@
 FORM f_check_status USING ps_order TYPE viaufkst.
 
-  DATA: lv_obj             TYPE cuobj,
-        lv_value           TYPE atwrt,
-        lv_stat            TYPE jest-stat,
-        lv_vornr           TYPE vornr,
-        lv_objid           TYPE c LENGTH 20,
+*---------------------------------------------------------------------*
+* Declarations
+*---------------------------------------------------------------------*
+  DATA: lv_obj            TYPE cuobj,
+        lv_value          TYPE atwrt,
+        lv_stat           TYPE jest-stat,
+        lv_vornr          TYPE vornr,
+        lv_objid          TYPE c LENGTH 20,
 
-        lv_rel_active      TYPE abap_bool VALUE abap_false,
-        lv_teco_active     TYPE abap_bool VALUE abap_false,
-        lv_locked_active   TYPE abap_bool VALUE abap_false,
-        lv_cmxs_active     TYPE abap_bool VALUE abap_false,
+        lv_rel_active     TYPE abap_bool VALUE abap_false,
+        lv_teco_active    TYPE abap_bool VALUE abap_false,
+        lv_locked_active  TYPE abap_bool VALUE abap_false,
+        lv_cmxs_active    TYPE abap_bool VALUE abap_false,
 
-        lv_prev_locked     TYPE abap_bool VALUE abap_false,
-        lv_prev_teco       TYPE abap_bool VALUE abap_false,
-        lv_status_changed  TYPE abap_bool VALUE abap_false,
+        lv_cdhdr_date     TYPE udate,
+        lv_cdhdr_time     TYPE utime,
+        lv_jcds_date      TYPE udate,
+        lv_jcds_time      TYPE utime,
 
-        lv_sts_date        TYPE udate,
-        lv_sts_time        TYPE utime,
-        lv_chg_date        TYPE udate,
-        lv_chg_time        TYPE utime,
-        lv_jcds_ts         TYPE char14,
-        lv_cdhdr_ts        TYPE char14.
+        lv_cdhdr_hit      TYPE abap_bool VALUE abap_false,
+        lv_jcds_hit       TYPE abap_bool VALUE abap_false,
+        lv_initial_order  TYPE abap_bool VALUE abap_false.
 
 *---------------------------------------------------------------------*
 * Prevent duplicate output
@@ -33,7 +34,7 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   ENDIF.
 
 *---------------------------------------------------------------------*
-* Classification: INTERFACE = CMX
+* INTERFACE = CMX
 *---------------------------------------------------------------------*
   CLEAR lv_obj.
 
@@ -59,7 +60,7 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   ENDIF.
 
 *---------------------------------------------------------------------*
-* Detect current active statuses (JEST)
+* Current system statuses (JEST)
 *---------------------------------------------------------------------*
   SELECT SINGLE stat FROM jest
     WHERE objnr = ps_order-objnr AND stat = 'I0002' AND inact = ''
@@ -82,64 +83,58 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
 
 *---------------------------------------------------------------------*
-* Detect PREVIOUS statuses (JCDS)
-*---------------------------------------------------------------------*
-  SELECT SINGLE * FROM jcds
-    WHERE objnr = ps_order-objnr
-      AND stat  = 'I0043'
-      AND inact = 'X'
-    INTO @DATA(ls_prev_lkd).
-  IF sy-subrc = 0.
-    lv_prev_locked = abap_true.
-  ENDIF.
-
-  SELECT SINGLE * FROM jcds
-    WHERE objnr = ps_order-objnr
-      AND stat  = 'I0045'
-      AND inact = 'X'
-    INTO @DATA(ls_prev_teco).
-  IF sy-subrc = 0.
-    lv_prev_teco = abap_true.
-  ENDIF.
-
-*---------------------------------------------------------------------*
-* Detect status transition (UNLOCK or TECO CANCEL)
-*---------------------------------------------------------------------*
-  IF ( lv_prev_locked = abap_true AND lv_locked_active = abap_false )
-   OR ( lv_prev_teco   = abap_true AND lv_teco_active   = abap_false ).
-    lv_status_changed = abap_true.
-  ENDIF.
-
-*---------------------------------------------------------------------*
-* Date / Time delta check (JCDS + CDHDR)
+* Latest CDHDR change
 *---------------------------------------------------------------------*
   CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
 
-  SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
-    INTO ( lv_sts_date, lv_sts_time )
-    FROM jcds
-    WHERE objnr = ps_order-objnr
-      AND stat IN ( 'I0043', 'I0045', 'I0002' )
-      AND ( udate > so_date-low
-         OR ( udate = so_date-low AND utime > so_time-low ) ).
-
-  IF lv_sts_date IS NOT INITIAL.
-    CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
-  ENDIF.
-
-  SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
-    INTO ( lv_chg_date, lv_chg_time )
+  SELECT udate, utime
     FROM cdhdr
     WHERE objectclas = 'ORDER'
       AND objectid   = lv_objid
-      AND ( udate > so_date-low
-         OR ( udate = so_date-low AND utime > so_time-low ) ).
+    ORDER BY udate DESCENDING, utime DESCENDING
+    INTO ( lv_cdhdr_date, lv_cdhdr_time )
+    UP TO 1 ROWS.
+  ENDSELECT.
 
-  IF lv_chg_date IS NOT INITIAL.
-    CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
+  IF sy-subrc = 0.
+    IF lv_cdhdr_date > so_date-low
+     OR ( lv_cdhdr_date = so_date-low AND lv_cdhdr_time >= so_time-low ).
+      lv_cdhdr_hit = abap_true.
+    ENDIF.
   ENDIF.
 
-  IF lv_jcds_ts IS INITIAL AND lv_cdhdr_ts IS INITIAL.
+*---------------------------------------------------------------------*
+* Latest JCDS change
+*---------------------------------------------------------------------*
+  SELECT udate, utime
+    FROM jcds
+    WHERE objnr = ps_order-objnr
+      AND stat IN ( 'I0002', 'I0043', 'I0045' )
+    ORDER BY udate DESCENDING, utime DESCENDING
+    INTO ( lv_jcds_date, lv_jcds_time )
+    UP TO 1 ROWS.
+  ENDSELECT.
+
+  IF sy-subrc = 0.
+    IF lv_jcds_date > so_date-low
+     OR ( lv_jcds_date = so_date-low AND lv_jcds_time >= so_time-low ).
+      lv_jcds_hit = abap_true.
+    ENDIF.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Initial order detection
+*---------------------------------------------------------------------*
+  IF lv_cmxs_active = abap_false.
+    lv_initial_order = abap_true.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* FINAL DELTA DECISION
+*---------------------------------------------------------------------*
+  IF lv_initial_order = abap_false
+   AND lv_cdhdr_hit  = abap_false
+   AND lv_jcds_hit   = abap_false.
     RETURN.
   ENDIF.
 
@@ -149,44 +144,31 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
 
 *---------------------------------------------------------------------*
-* Decision Logic (FDS-compliant)
+* Status & MESSAGE (OLD STYLE)
 *---------------------------------------------------------------------*
-
-  " 1. LOCKED → send to CMX only if CMXS exists
   IF lv_locked_active = abap_true.
     lv_stat = 'I0043'.
-    IF lv_cmxs_active = abap_true.
-      gs_output-msg = 'Locked – resend to CMX'.
-      PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-      APPEND gs_output TO gt_output.
-    ENDIF.
-    RETURN.
-  ENDIF.
+    gs_output-msg = 'Locked – resend to CMX'.
 
-  " 2. TECO → always send to CMX
-  IF lv_teco_active = abap_true.
+  ELSEIF lv_teco_active = abap_true.
     lv_stat = 'I0045'.
     gs_output-msg = 'TECO – send to CMX'.
-    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-    APPEND gs_output TO gt_output.
-    RETURN.
-  ENDIF.
 
-  " 3. REL → resend if unlocked or TECO cancelled (even with CMXS)
-  IF lv_rel_active = abap_true.
+  ELSE.
     lv_stat = 'I0002'.
 
-    IF lv_status_changed = abap_true.
-      gs_output-msg = 'REL after unlock / TECO cancel – resend to CMX'.
-    ELSEIF lv_cmxs_active = abap_true.
-      gs_output-msg = 'REL with CMXS – send to CMX only'.
-    ELSE.
+    IF lv_initial_order = abap_true.
       gs_output-msg = 'REL – send to BAPI and CMX'.
+    ELSE.
+      gs_output-msg = 'REL with CMXS – send to CMX only'.
     ENDIF.
 
-    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-    APPEND gs_output TO gt_output.
-    RETURN.
   ENDIF.
+
+*---------------------------------------------------------------------*
+* Build output
+*---------------------------------------------------------------------*
+  PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+  APPEND gs_output TO gt_output.
 
 ENDFORM.
