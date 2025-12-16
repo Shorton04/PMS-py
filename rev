@@ -1,195 +1,39 @@
-FORM f_check_status USING ps_order TYPE viaufkst.
-
 *---------------------------------------------------------------------*
-* Declarations
+*   Date-Time Range filtering (FIXED – NO MAX)
 *---------------------------------------------------------------------*
-  DATA: lv_obj           TYPE cuobj,
-        lv_value         TYPE atwrt,
-        lv_stat          TYPE jest-stat,
-        lv_vornr         TYPE vornr,
-        lv_objid         TYPE c LENGTH 20,
-
-        lv_rel_active    TYPE abap_bool VALUE abap_false,
-        lv_teco_active   TYPE abap_bool VALUE abap_false,
-        lv_locked_active TYPE abap_bool VALUE abap_false,
-        lv_cmxs_active   TYPE abap_bool VALUE abap_false,
-
-        lv_cdhdr_hit     TYPE abap_bool VALUE abap_false,
-        lv_jcds_hit      TYPE abap_bool VALUE abap_false,
-        lv_initial_order TYPE abap_bool VALUE abap_false.
-
-*---------------------------------------------------------------------*
-* Prevent duplicate output
-*---------------------------------------------------------------------*
-  READ TABLE gt_output TRANSPORTING NO FIELDS
-       WITH KEY MaintenanceOrder = ps_order-aufnr
-       BINARY SEARCH.
-  IF sy-subrc = 0.
-    RETURN.
-  ENDIF.
-
-*---------------------------------------------------------------------*
-* INTERFACE = CMX (classification)
-*---------------------------------------------------------------------*
-  CLEAR lv_obj.
-
-  IF ps_order-equnr IS NOT INITIAL.
-    SELECT SINGLE cuobj
-      FROM inob
-      INTO @lv_obj
-      WHERE objek = @ps_order-equnr.
-  ENDIF.
-
-  IF lv_obj IS INITIAL AND ps_order-tplnr IS NOT INITIAL.
-    SELECT SINGLE cuobj
-      FROM inob
-      INTO @lv_obj
-      WHERE objek = @ps_order-tplnr.
-  ENDIF.
-
-  IF lv_obj IS INITIAL.
-    RETURN.
-  ENDIF.
-
-  SELECT SINGLE atwrt
-    FROM ausp
-    INTO @lv_value
-    WHERE objek = @lv_obj
-      AND atinn = @gv_atinn.
-
-  IF sy-subrc <> 0 OR lv_value <> 'CMX'.
-    RETURN.
-  ENDIF.
-
-*---------------------------------------------------------------------*
-* Current system statuses (JEST)
-*---------------------------------------------------------------------*
-  SELECT SINGLE stat FROM jest
-    INTO @lv_stat
-    WHERE objnr = @ps_order-objnr
-      AND stat  = 'I0002'
-      AND inact = ''.
-  IF sy-subrc = 0. lv_rel_active = abap_true. ENDIF.
-
-  SELECT SINGLE stat FROM jest
-    INTO @lv_stat
-    WHERE objnr = @ps_order-objnr
-      AND stat  = 'I0045'
-      AND inact = ''.
-  IF sy-subrc = 0. lv_teco_active = abap_true. ENDIF.
-
-  SELECT SINGLE stat FROM jest
-    INTO @lv_stat
-    WHERE objnr = @ps_order-objnr
-      AND stat  = 'I0043'
-      AND inact = ''.
-  IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
-
-  SELECT SINGLE stat FROM jest
-    INTO @lv_stat
-    WHERE objnr = @ps_order-objnr
-      AND stat  = 'E0014'
-      AND inact = ''.
-  IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
-
-*---------------------------------------------------------------------*
-* Build ORDER object id for CDHDR
-*---------------------------------------------------------------------*
+  CONCATENATE so_date-low so_time-low INTO lv_input_ts.
   CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
 
-*---------------------------------------------------------------------*
-* CDHDR – detect ANY header change inside window
-*---------------------------------------------------------------------*
-  CLEAR lv_cdhdr_hit.
+*--- Check JCDS: any status change after input timestamp
+  SELECT SINGLE objnr
+    FROM jcds
+    WHERE objnr = @ps_order-objnr
+      AND stat  IN ( 'I0043', 'I0045', 'I0002' )
+      AND (
+            udate >  @so_date-low
+         OR ( udate = @so_date-low AND utime > @so_time-low )
+          )
+    INTO @DATA(lv_jcds_dummy).
 
+  IF sy-subrc = 0.
+    lv_jcds_ts = 'X'.   " marker only
+  ENDIF.
+
+*--- Check CDHDR: any header change after input timestamp
   SELECT SINGLE objectid
     FROM cdhdr
     WHERE objectclas = 'ORDER'
       AND objectid   = @lv_objid
       AND (
             udate >  @so_date-low
-         OR ( udate = @so_date-low AND utime >= @so_time-low )
+         OR ( udate = @so_date-low AND utime > @so_time-low )
           )
-      AND (
-            udate <  @so_date-high
-         OR ( udate = @so_date-high AND utime <= @so_time-high )
-          )
-    INTO @DATA(lv_dummy_cdhdr).
+    INTO @DATA(lv_cdhdr_dummy).
 
   IF sy-subrc = 0.
-    lv_cdhdr_hit = abap_true.
+    lv_cdhdr_ts = 'X'.  " marker only
   ENDIF.
 
-*---------------------------------------------------------------------*
-* JCDS – detect ANY status change inside window
-*---------------------------------------------------------------------*
-  CLEAR lv_jcds_hit.
-
-  SELECT SINGLE objnr
-    FROM jcds
-    WHERE objnr = @ps_order-objnr
-      AND stat  IN ( 'I0002', 'I0043', 'I0045' )
-      AND (
-            udate >  @so_date-low
-         OR ( udate = @so_date-low AND utime >= @so_time-low )
-          )
-      AND (
-            udate <  @so_date-high
-         OR ( udate = @so_date-high AND utime <= @so_time-high )
-          )
-    INTO @DATA(lv_dummy_jcds).
-
-  IF sy-subrc = 0.
-    lv_jcds_hit = abap_true.
-  ENDIF.
-
-*---------------------------------------------------------------------*
-* Initial order detection (never sent)
-*---------------------------------------------------------------------*
-  IF lv_cmxs_active = abap_false.
-    lv_initial_order = abap_true.
-  ENDIF.
-
-*---------------------------------------------------------------------*
-* FINAL DELTA DECISION
-*---------------------------------------------------------------------*
-  IF lv_initial_order = abap_false
-   AND lv_cdhdr_hit  = abap_false
-   AND lv_jcds_hit   = abap_false.
+  IF lv_jcds_ts IS INITIAL AND lv_cdhdr_ts IS INITIAL.
     RETURN.
   ENDIF.
-
-*---------------------------------------------------------------------*
-* Get first active operation
-*---------------------------------------------------------------------*
-  PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
-
-*---------------------------------------------------------------------*
-* Status & MESSAGE (OLD STYLE)
-*---------------------------------------------------------------------*
-  IF lv_locked_active = abap_true.
-    lv_stat = 'I0043'.
-    gs_output-msg = 'Locked – resend to CMX'.
-
-  ELSEIF lv_teco_active = abap_true.
-    lv_stat = 'I0045'.
-    gs_output-msg = 'TECO – send to CMX'.
-
-  ELSE.
-    lv_stat = 'I0002'.
-
-    IF lv_initial_order = abap_true.
-      gs_output-msg = 'REL – send to BAPI and CMX'.
-    ELSE.
-      gs_output-msg = 'REL with CMXS – send to CMX only'.
-    ENDIF.
-
-  ENDIF.
-
-*---------------------------------------------------------------------*
-* Build output
-*---------------------------------------------------------------------*
-  PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-  APPEND gs_output TO gt_output.
-
-ENDFORM.
