@@ -3,25 +3,23 @@ FORM f_check_status USING ps_order TYPE viaufkst.
 *---------------------------------------------------------------------*
 * Declarations
 *---------------------------------------------------------------------*
-  DATA: lv_obj            TYPE cuobj,
-        lv_value          TYPE atwrt,
-        lv_stat           TYPE jest-stat,
-        lv_vornr          TYPE vornr,
-        lv_objid          TYPE c LENGTH 20,
+  DATA: lv_obj           TYPE cuobj,
+        lv_value         TYPE atwrt,
+        lv_stat          TYPE jest-stat,
+        lv_vornr         TYPE vornr,
+        lv_objid         TYPE c LENGTH 20,
 
-        lv_rel_active     TYPE abap_bool VALUE abap_false,
-        lv_teco_active    TYPE abap_bool VALUE abap_false,
-        lv_locked_active  TYPE abap_bool VALUE abap_false,
-        lv_cmxs_active    TYPE abap_bool VALUE abap_false,
+        lv_rel_active    TYPE abap_bool VALUE abap_false,
+        lv_teco_active   TYPE abap_bool VALUE abap_false,
+        lv_locked_active TYPE abap_bool VALUE abap_false,
+        lv_cmxs_active   TYPE abap_bool VALUE abap_false,
 
-        lv_cdhdr_date     TYPE udate,
-        lv_cdhdr_time     TYPE utime,
-        lv_jcds_date      TYPE udate,
-        lv_jcds_time      TYPE utime,
+        lv_cdhdr_hit     TYPE abap_bool VALUE abap_false,
+        lv_jcds_hit      TYPE abap_bool VALUE abap_false,
+        lv_initial_order TYPE abap_bool VALUE abap_false.
 
-        lv_cdhdr_hit      TYPE abap_bool VALUE abap_false,
-        lv_jcds_hit       TYPE abap_bool VALUE abap_false,
-        lv_initial_order  TYPE abap_bool VALUE abap_false.
+  DATA: ls_cdhdr TYPE cdhdr,
+        ls_jcds  TYPE jcds.
 
 *---------------------------------------------------------------------*
 * Prevent duplicate output
@@ -34,26 +32,33 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   ENDIF.
 
 *---------------------------------------------------------------------*
-* INTERFACE = CMX
+* INTERFACE = CMX (classification check)
 *---------------------------------------------------------------------*
   CLEAR lv_obj.
 
   IF ps_order-equnr IS NOT INITIAL.
-    SELECT SINGLE cuobj INTO lv_obj FROM inob WHERE objek = ps_order-equnr.
+    SELECT SINGLE cuobj
+      FROM inob
+      INTO @lv_obj
+      WHERE objek = @ps_order-equnr.
   ENDIF.
 
   IF lv_obj IS INITIAL AND ps_order-tplnr IS NOT INITIAL.
-    SELECT SINGLE cuobj INTO lv_obj FROM inob WHERE objek = ps_order-tplnr.
+    SELECT SINGLE cuobj
+      FROM inob
+      INTO @lv_obj
+      WHERE objek = @ps_order-tplnr.
   ENDIF.
 
   IF lv_obj IS INITIAL.
     RETURN.
   ENDIF.
 
-  SELECT SINGLE atwrt INTO lv_value
+  SELECT SINGLE atwrt
     FROM ausp
-    WHERE objek = lv_obj
-      AND atinn = gv_atinn.
+    INTO @lv_value
+    WHERE objek = @lv_obj
+      AND atinn = @gv_atinn.
 
   IF sy-subrc <> 0 OR lv_value <> 'CMX'.
     RETURN.
@@ -63,23 +68,31 @@ FORM f_check_status USING ps_order TYPE viaufkst.
 * Current system statuses (JEST)
 *---------------------------------------------------------------------*
   SELECT SINGLE stat FROM jest
-    WHERE objnr = ps_order-objnr AND stat = 'I0002' AND inact = ''
-    INTO lv_stat.
+    INTO @lv_stat
+    WHERE objnr = @ps_order-objnr
+      AND stat  = 'I0002'
+      AND inact = ''.
   IF sy-subrc = 0. lv_rel_active = abap_true. ENDIF.
 
   SELECT SINGLE stat FROM jest
-    WHERE objnr = ps_order-objnr AND stat = 'I0045' AND inact = ''
-    INTO lv_stat.
+    INTO @lv_stat
+    WHERE objnr = @ps_order-objnr
+      AND stat  = 'I0045'
+      AND inact = ''.
   IF sy-subrc = 0. lv_teco_active = abap_true. ENDIF.
 
   SELECT SINGLE stat FROM jest
-    WHERE objnr = ps_order-objnr AND stat = 'I0043' AND inact = ''
-    INTO lv_stat.
+    INTO @lv_stat
+    WHERE objnr = @ps_order-objnr
+      AND stat  = 'I0043'
+      AND inact = ''.
   IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
 
   SELECT SINGLE stat FROM jest
-    WHERE objnr = ps_order-objnr AND stat = 'E0014' AND inact = ''
-    INTO lv_stat.
+    INTO @lv_stat
+    WHERE objnr = @ps_order-objnr
+      AND stat  = 'E0014'
+      AND inact = ''.
   IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
 
 *---------------------------------------------------------------------*
@@ -87,18 +100,22 @@ FORM f_check_status USING ps_order TYPE viaufkst.
 *---------------------------------------------------------------------*
   CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
 
-  SELECT udate, utime
+  CLEAR ls_cdhdr.
+  CLEAR lv_cdhdr_hit.
+
+  SELECT *
     FROM cdhdr
+    INTO @ls_cdhdr
     WHERE objectclas = 'ORDER'
-      AND objectid   = lv_objid
-    ORDER BY udate DESCENDING, utime DESCENDING
-    INTO ( lv_cdhdr_date, lv_cdhdr_time )
+      AND objectid   = @lv_objid
+    ORDER BY udate DESCENDING utime DESCENDING
     UP TO 1 ROWS.
   ENDSELECT.
 
   IF sy-subrc = 0.
-    IF lv_cdhdr_date > so_date-low
-     OR ( lv_cdhdr_date = so_date-low AND lv_cdhdr_time >= so_time-low ).
+    IF ls_cdhdr-udate > so_date-low
+     OR ( ls_cdhdr-udate = so_date-low
+      AND ls_cdhdr-utime >= so_time-low ).
       lv_cdhdr_hit = abap_true.
     ENDIF.
   ENDIF.
@@ -106,24 +123,28 @@ FORM f_check_status USING ps_order TYPE viaufkst.
 *---------------------------------------------------------------------*
 * Latest JCDS change
 *---------------------------------------------------------------------*
-  SELECT udate, utime
+  CLEAR ls_jcds.
+  CLEAR lv_jcds_hit.
+
+  SELECT *
     FROM jcds
-    WHERE objnr = ps_order-objnr
-      AND stat IN ( 'I0002', 'I0043', 'I0045' )
-    ORDER BY udate DESCENDING, utime DESCENDING
-    INTO ( lv_jcds_date, lv_jcds_time )
+    INTO @ls_jcds
+    WHERE objnr = @ps_order-objnr
+      AND stat  IN ( 'I0002', 'I0043', 'I0045' )
+    ORDER BY udate DESCENDING utime DESCENDING
     UP TO 1 ROWS.
   ENDSELECT.
 
   IF sy-subrc = 0.
-    IF lv_jcds_date > so_date-low
-     OR ( lv_jcds_date = so_date-low AND lv_jcds_time >= so_time-low ).
+    IF ls_jcds-udate > so_date-low
+     OR ( ls_jcds-udate = so_date-low
+      AND ls_jcds-utime >= so_time-low ).
       lv_jcds_hit = abap_true.
     ENDIF.
   ENDIF.
 
 *---------------------------------------------------------------------*
-* Initial order detection
+* Initial order detection (never sent before)
 *---------------------------------------------------------------------*
   IF lv_cmxs_active = abap_false.
     lv_initial_order = abap_true.
@@ -144,7 +165,7 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
 
 *---------------------------------------------------------------------*
-* Status & MESSAGE (OLD STYLE)
+* Status & MESSAGE (OLD STYLE – EXACT)
 *---------------------------------------------------------------------*
   IF lv_locked_active = abap_true.
     lv_stat = 'I0043'.
