@@ -1,6 +1,19 @@
-* Debug info (optional - can be removed after testing)
-IF sy-batch IS INITIAL AND p_test = abap_true.
-  WRITE: / 'Order:', ps_order-aufnr, 
-         'JCDS TS:', lv_jcds_ts, 
-         'CDHDR TS:', lv_cdhdr_ts.
+DATA lv_status_cancelled TYPE abap_bool VALUE abap_false.
+
+SELECT SINGLE objnr
+  FROM jcds
+  WHERE objnr = @ps_order-objnr
+    AND inact = 'X'
+    AND stat IN ( 'I0043', 'I0045' )
+    AND ( ( udate > @so_date-low )
+       OR ( udate = @so_date-low AND utime > @so_time-low ) ).
+
+IF sy-subrc = 0.
+  lv_status_cancelled = abap_true.
+ENDIF.
+
+IF lv_jcds_ts IS INITIAL
+   AND lv_cdhdr_ts IS INITIAL
+   AND lv_status_cancelled = abap_false.
+  RETURN.
 ENDIF.
