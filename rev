@@ -1,7 +1,100 @@
 *---------------------------------------------------------------------*
+FORM f_check_status USING ps_order TYPE viaufkst.
+
+  DATA: lv_obj            TYPE cuobj,
+        lv_value          TYPE atwrt,
+        lv_stat           TYPE jest-stat,
+        lv_vornr          TYPE vornr,
+        lv_objid          TYPE c LENGTH 20,
+        lv_rel_active     TYPE abap_bool VALUE abap_false,
+        lv_teco_active    TYPE abap_bool VALUE abap_false,
+        lv_locked_active  TYPE abap_bool VALUE abap_false,
+        lv_cmxs_active    TYPE abap_bool VALUE abap_false,
+        lv_prev_locked    TYPE abap_bool VALUE abap_false,
+        lv_teco_cancelled TYPE abap_bool VALUE abap_false,
+        lv_sts_date       TYPE udate,
+        lv_sts_time       TYPE utime,
+        lv_chg_date       TYPE udate,
+        lv_chg_time       TYPE utime,
+        lv_input_ts       TYPE char14,
+        lv_jcds_ts        TYPE char14,
+        lv_cdhdr_ts       TYPE char14,
+        lv_unlock_date    TYPE udate,
+        lv_unlock_time    TYPE utime,
+        lv_teco_rev_date  TYPE udate,
+        lv_teco_rev_time  TYPE utime.
+
+*---------------------------------------------------------------------*
+*  CRITICAL FIX: Check for duplicate at the very start
+*---------------------------------------------------------------------*
+  READ TABLE gt_output TRANSPORTING NO FIELDS
+  WITH KEY MaintenanceOrder = ps_order-aufnr
+  BINARY SEARCH.
+  IF sy-subrc = 0.
+    RETURN.  " Already processed this order
+  ENDIF.
+
+*---------------------------------------------------------------------*
+*   Classification (INTERFACE = CMX)
+*---------------------------------------------------------------------*
+  CLEAR lv_obj.
+  IF ps_order-equnr IS NOT INITIAL.
+    SELECT SINGLE cuobj INTO @lv_obj FROM inob WHERE objek = @ps_order-equnr.
+  ENDIF.
+  IF lv_obj IS INITIAL AND ps_order-tplnr IS NOT INITIAL.
+    SELECT SINGLE cuobj INTO @lv_obj FROM inob WHERE objek = @ps_order-tplnr.
+  ENDIF.
+  IF lv_obj IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT SINGLE atwrt INTO @lv_value
+  FROM ausp
+  WHERE objek = @lv_obj AND atinn = @gv_atinn.
+  IF sy-subrc <> 0 OR lv_value <> 'CMX'.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+*  Detect current active statuses
+*---------------------------------------------------------------------*
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+  WHERE objnr = @ps_order-objnr AND stat = 'I0002' AND inact = ''.
+  IF sy-subrc = 0. lv_rel_active = abap_true. ENDIF.
+
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+  WHERE objnr = @ps_order-objnr AND stat = 'I0045' AND inact = ''.
+  IF sy-subrc = 0. lv_teco_active = abap_true. ENDIF.
+
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+  WHERE objnr = @ps_order-objnr AND stat = 'I0043' AND inact = ''.
+  IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
+
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+  WHERE objnr = @ps_order-objnr AND stat = 'E0014' AND inact = ''.
+  IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
+
+*---------------------------------------------------------------------*
+*   Check if order was previously locked (and recently unlocked)
+*---------------------------------------------------------------------*
+  SELECT udate, utime
+  FROM jcds
+  WHERE objnr = @ps_order-objnr
+  AND stat  = 'I0043'
+  AND inact = 'X'
+  ORDER BY udate DESCENDING, utime DESCENDING
+  INTO (@lv_unlock_date, @lv_unlock_time)
+  UP TO 1 ROWS.
+  ENDSELECT.
+
+  IF sy-subrc = 0.
+    lv_prev_locked = abap_true.
+  ENDIF.
+
+*---------------------------------------------------------------------*
 *   Check if TECO was recently cancelled (reversal)
 *---------------------------------------------------------------------*
-  SELECT udate, utime 
+  SELECT udate, utime
   FROM jcds
   WHERE objnr = @ps_order-objnr
   AND stat  = 'I0045'
@@ -10,7 +103,7 @@
   INTO (@lv_teco_rev_date, @lv_teco_rev_time)
   UP TO 1 ROWS.
   ENDSELECT.
-  
+
   IF sy-subrc = 0.
     lv_teco_cancelled = abap_true.
   ENDIF.
@@ -31,8 +124,6 @@
     WRITE: / '---'.
   ENDIF.
 
-
-
 *---------------------------------------------------------------------*
 *   Date-Time Range filtering - FIXED to detect ALL status changes
 *---------------------------------------------------------------------*
@@ -40,7 +131,8 @@
   CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
 
 * Check for ANY status change (activation OR deactivation) in JCDS
-* CRITICAL: This catches TECO cancellations, unlocks, and new statuses
+* CRITICAL FIX: Removed "AND inact = ''" to catch reversals
+* CRITICAL FIX: Changed > to >= for time comparison
   SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
   INTO ( @lv_sts_date, @lv_sts_time )
   FROM jcds
@@ -48,13 +140,13 @@
   AND stat IN ( 'I0043', 'I0045', 'I0002' )
   AND ( ( udate > @so_date-low )
      OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
-  " NOTE: No filter on inact - catches both '' and 'X'
 
   IF sy-subrc = 0 AND lv_sts_date IS NOT INITIAL.
     CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
   ENDIF.
 
 * Check for any field changes in CDHDR
+* CRITICAL FIX: Changed > to >= for time comparison
   SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
   INTO ( @lv_chg_date, @lv_chg_time )
   FROM cdhdr
@@ -73,13 +165,13 @@
   ENDIF.
 
 *---------------------------------------------------------------------*
-*   Verify unlock/TECO cancellation happened within time window
+*   Additional check: Verify unlock/TECO cancellation within time window
 *---------------------------------------------------------------------*
-  DATA: lv_unlock_in_window TYPE abap_bool VALUE abap_false,
+  DATA: lv_unlock_in_window   TYPE abap_bool VALUE abap_false,
         lv_teco_rev_in_window TYPE abap_bool VALUE abap_false.
 
   " Check if unlock happened in time window
-  IF lv_prev_locked = abap_true AND lv_unlock_date IS NOT INITIAL.
+  IF lv_prev_locked = abap_true.
     IF ( lv_unlock_date > so_date-low ) OR
        ( lv_unlock_date = so_date-low AND lv_unlock_time >= so_time-low ).
       lv_unlock_in_window = abap_true.
@@ -87,14 +179,17 @@
   ENDIF.
 
   " Check if TECO cancellation happened in time window
-  IF lv_teco_cancelled = abap_true AND lv_teco_rev_date IS NOT INITIAL.
+  IF lv_teco_cancelled = abap_true.
     IF ( lv_teco_rev_date > so_date-low ) OR
        ( lv_teco_rev_date = so_date-low AND lv_teco_rev_time >= so_time-low ).
       lv_teco_rev_in_window = abap_true.
     ENDIF.
   ENDIF.
 
-
+*---------------------------------------------------------------------*
+*   Get operation
+*---------------------------------------------------------------------*
+  PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
 
 *---------------------------------------------------------------------*
 *   Business Logic with Enhanced Change Detection
@@ -132,35 +227,28 @@
   IF lv_rel_active = abap_true.
     lv_stat = 'I0002'.
 
-    " 3a. TECO was cancelled (reverted to REL) within time window
-    " Check this FIRST because it's more specific
-    IF lv_teco_cancelled = abap_true AND lv_teco_rev_in_window = abap_true.
-      IF lv_cmxs_active = abap_true.
-        gs_output-msg = 'TECO Cancelled (REL) with CMXS – send to CMX only'.
-      ELSE.
-        gs_output-msg = 'TECO Cancelled (REL) without CMXS – send to BAPI and CMX'.
-      ENDIF.
-
-    " 3b. Recently unlocked from LOCKED within time window
-    ELSEIF lv_prev_locked = abap_true AND lv_unlock_in_window = abap_true.
+    " 3a. Recently unlocked from LOCKED within time window
+    IF lv_prev_locked = abap_true AND lv_unlock_in_window = abap_true.
       IF lv_cmxs_active = abap_true.
         gs_output-msg = 'Unlocked REL with CMXS – send to CMX only'.
       ELSE.
         gs_output-msg = 'Unlocked REL without CMXS – send to BAPI and CMX'.
       ENDIF.
 
-    " 3c. Normal REL (no recent unlock or TECO cancellation in time window)
-    ELSE.
-      " Only process if there was some change in the time window
-      IF lv_jcds_ts IS NOT INITIAL OR lv_cdhdr_ts IS NOT INITIAL.
-        IF lv_cmxs_active = abap_true.
-          gs_output-msg = 'REL with CMXS – send to CMX only'.
-        ELSE.
-          gs_output-msg = 'REL – send to BAPI and CMX'.
-        ENDIF.
+      " 3b. TECO was cancelled (reverted to REL) within time window
+    ELSEIF lv_teco_cancelled = abap_true AND lv_teco_rev_in_window = abap_true.
+      IF lv_cmxs_active = abap_true.
+        gs_output-msg = 'TECO Cancelled (REL) with CMXS – send to CMX only'.
       ELSE.
-        " No relevant changes in time window, skip
-        RETURN.
+        gs_output-msg = 'TECO Cancelled (REL) without CMXS – send to BAPI and CMX'.
+      ENDIF.
+
+      " 3c. Normal REL (no recent unlock or TECO cancellation)
+    ELSE.
+      IF lv_cmxs_active = abap_true.
+        gs_output-msg = 'REL with CMXS – send to CMX only'.
+      ELSE.
+        gs_output-msg = 'REL – send to BAPI and CMX'.
       ENDIF.
     ENDIF.
 
