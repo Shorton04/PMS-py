@@ -1,25 +1,23 @@
-DATA: ls_jcds_teco TYPE jcds,
-      ls_jcds_lkd  TYPE jcds.
-
 CLEAR: ls_jcds_teco, lv_teco_cancelled, lv_teco_rev_in_window.
 
-SELECT SINGLE *
+SELECT *
   FROM jcds
   INTO ls_jcds_teco
  WHERE objnr = @ps_order-objnr
    AND stat  = 'I0045'
- ORDER BY chgnr DESCENDING.
+ ORDER BY chgnr DESCENDING
+ UP TO 1 ROWS.
+ENDSELECT.
 
 IF sy-subrc = 0.
 
-  " Latest TECO record exists
+  " Latest TECO status
   lv_teco_active = xsdbool( ls_jcds_teco-inact IS INITIAL ).
 
-  " If latest TECO is inactive → TECO was cancelled
+  " TECO cancelled
   IF ls_jcds_teco-inact = 'X'.
     lv_teco_cancelled = abap_true.
 
-    " Validate time window
     IF ( ls_jcds_teco-udate > so_date-low )
     OR ( ls_jcds_teco-udate = so_date-low
      AND ls_jcds_teco-utime >= so_time-low ).
@@ -35,16 +33,18 @@ ENDIF.
 
 CLEAR: ls_jcds_lkd, lv_prev_locked, lv_unlock_in_window.
 
-SELECT SINGLE *
+SELECT *
   FROM jcds
   INTO ls_jcds_lkd
  WHERE objnr = @ps_order-objnr
    AND stat  = 'I0043'
- ORDER BY chgnr DESCENDING.
+ ORDER BY chgnr DESCENDING
+ UP TO 1 ROWS.
+ENDSELECT.
 
 IF sy-subrc = 0.
 
-  " If latest LOCKED record is inactive → unlocked
+  " Latest LOCKED status was removed
   IF ls_jcds_lkd-inact = 'X'.
     lv_prev_locked = abap_true.
 
@@ -57,8 +57,3 @@ IF sy-subrc = 0.
   ENDIF.
 
 ENDIF.
-
-
-
-
-a
