@@ -1,33 +1,37 @@
 *---------------------------------------------------------------------*
-* Date-Time filter
-* Always allow REMOVE for TECO / LOCKED
+*   Date-Time Range filtering - FIXED to detect status changes
+*   including TECO cancellation and unlock events
 *---------------------------------------------------------------------*
-IF lv_teco_active = abap_true OR lv_locked_active = abap_true.
-  " Always process TECO / LOCKED (even outside time window)
-ELSE.
+  CONCATENATE so_date-low so_time-low INTO lv_input_ts.
+  CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
+
+* Check for ANY status change (activation OR deactivation) in JCDS
+  SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+  INTO ( @lv_sts_date, @lv_sts_time )
+  FROM jcds
+  WHERE objnr = @ps_order-objnr
+  AND stat IN ( 'I0043', 'I0045', 'I0002' )  " Lock, TECO, REL
+  AND ( ( udate > @so_date-low )
+     OR ( udate = @so_date-low AND utime > @so_time-low ) ).
+  " Note: Removed inact filter to catch BOTH activations and deactivations
+
+  IF sy-subrc = 0 AND lv_sts_date IS NOT INITIAL.
+    CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
+  ENDIF.
+
+* Check for any field changes in CDHDR
+  SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+  INTO ( @lv_chg_date, @lv_chg_time )
+  FROM cdhdr
+  WHERE objectclas = 'ORDER'
+  AND objectid   = @lv_objid
+  AND ( ( udate > @so_date-low )
+     OR ( udate = @so_date-low AND utime > @so_time-low ) ).
+
+  IF sy-subrc = 0 AND lv_chg_date IS NOT INITIAL.
+    CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
+  ENDIF.
+
   IF lv_jcds_ts IS INITIAL AND lv_cdhdr_ts IS INITIAL.
     RETURN.
   ENDIF.
-ENDIF.
-
-
-
-*---------------------------------------------------------------------*
-* Get status profile
-*---------------------------------------------------------------------*
-DATA lv_stsma TYPE tj30-stsma.
-
-SELECT SINGLE stsma
-  INTO lv_stsma
-  FROM jest
- WHERE objnr = <ls_output_row>-MaintenanceOrder.
-
-*---------------------------------------------------------------------*
-* Remove CMXS
-*---------------------------------------------------------------------*
-APPEND VALUE #(
-  user_st_text = 'CMXS'
-  inactive     = 'X'
-  langu        = sy-langu
-  stsma        = lv_stsma
-) TO lt_status.
