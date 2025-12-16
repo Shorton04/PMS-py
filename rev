@@ -1,3 +1,5 @@
+FORM f_check_status USING ps_order TYPE viaufkst.
+
   DATA: lv_obj              TYPE cuobj,
         lv_value            TYPE atwrt,
         lv_stat             TYPE jest-stat,
@@ -33,8 +35,7 @@
 
   SELECT SINGLE atwrt INTO @lv_value
     FROM ausp
-    WHERE objek = @lv_obj
-      AND atinn = @gv_atinn.
+    WHERE objek = @lv_obj AND atinn = @gv_atinn.
   IF sy-subrc <> 0 OR lv_value <> 'CMX'.
     RETURN.
   ENDIF.
@@ -54,32 +55,38 @@
     WHERE objnr = @ps_order-objnr AND stat = 'I0043' AND inact = ''.
   IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
 
+* CMXS = E0014
   SELECT SINGLE stat FROM jest INTO @lv_stat
     WHERE objnr = @ps_order-objnr AND stat = 'E0014' AND inact = ''.
   IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
 
 *---------------------------------------------------------------------*
-* Check if previously locked
+* Previously locked?
 *---------------------------------------------------------------------*
-  SELECT SINGLE * FROM jcds
+  SELECT SINGLE objnr
+    INTO @lv_dummy
+    FROM jcds
     WHERE objnr = @ps_order-objnr
       AND stat  = 'I0043'
-      AND inact = 'X'
-    INTO @DATA(ls_prev_lkd).
+      AND inact = 'X'.
   IF sy-subrc = 0.
     lv_prev_locked = abap_true.
   ENDIF.
 
 *---------------------------------------------------------------------*
-* Delta detection (JCDS / CDHDR / Cancel-Unlock)
+* Delta detection (INCLUDING cancel / unlock)
 *---------------------------------------------------------------------*
   SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
     INTO ( @lv_sts_date, @lv_sts_time )
     FROM jcds
     WHERE objnr = @ps_order-objnr
       AND stat IN ( 'I0043', 'I0045', 'I0002' )
-      AND ( udate > @so_date-low
-         OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+      AND (
+            ( udate >  @so_date-low OR
+             ( udate = @so_date-low AND utime >= @so_time-low ) )
+        AND ( udate <  @so_date-high OR
+             ( udate = @so_date-high AND utime <= @so_time-high ) )
+          ).
 
   IF lv_sts_date IS NOT INITIAL.
     CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
@@ -92,30 +99,35 @@
     FROM cdhdr
     WHERE objectclas = 'ORDER'
       AND objectid   = @lv_objid
-      AND ( udate > @so_date-low
-         OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+      AND (
+            ( udate >  @so_date-low OR
+             ( udate = @so_date-low AND utime >= @so_time-low ) )
+        AND ( udate <  @so_date-high OR
+             ( udate = @so_date-high AND utime <= @so_time-high ) )
+          ).
 
   IF lv_chg_date IS NOT INITIAL.
     CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
   ENDIF.
 
-* Detect cancelled / unlocked
+* Cancel / unlock detection
   SELECT SINGLE objnr
     INTO @lv_dummy
     FROM jcds
     WHERE objnr = @ps_order-objnr
       AND inact = 'X'
       AND stat IN ( 'I0043', 'I0045' )
-      AND ( udate > @so_date-low
-         OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+      AND (
+            ( udate >  @so_date-low OR
+             ( udate = @so_date-low AND utime >= @so_time-low ) )
+        AND ( udate <  @so_date-high OR
+             ( udate = @so_date-high AND utime <= @so_time-high ) )
+          ).
 
   IF sy-subrc = 0.
     lv_status_cancelled = abap_true.
   ENDIF.
 
-*---------------------------------------------------------------------*
-* Exit if no delta
-*---------------------------------------------------------------------*
   IF lv_jcds_ts IS INITIAL
      AND lv_cdhdr_ts IS INITIAL
      AND lv_status_cancelled = abap_false.
@@ -123,11 +135,23 @@
   ENDIF.
 
 *---------------------------------------------------------------------*
-* Duplicate protection (MOVED HERE — FIX)
+* Duplicate protection (MOVED HERE)
 *---------------------------------------------------------------------*
   READ TABLE gt_output TRANSPORTING NO FIELDS
     WITH KEY MaintenanceOrder = ps_order-aufnr
     BINARY SEARCH.
   IF sy-subrc = 0.
     RETURN.
-  ENDIF
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Get operation
+*---------------------------------------------------------------------*
+  PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
+
+*---------------------------------------------------------------------*
+* Existing status handling (unchanged)
+*---------------------------------------------------------------------*
+  " ... your LOCKED / TECO / REL logic remains exactly the same ...
+
+ENDFORM.
