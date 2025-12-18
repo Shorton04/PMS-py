@@ -1,25 +1,33 @@
 FORM f_check_status USING ps_order TYPE viaufkst.
 
-  DATA: lv_obj            TYPE cuobj,
-        lv_value          TYPE atwrt,
-        lv_stat           TYPE jest-stat,
-        lv_vornr          TYPE vornr,
-        lv_objid          TYPE c LENGTH 20,
-        lv_rel_active     TYPE abap_bool VALUE abap_false,
-        lv_teco_active    TYPE abap_bool VALUE abap_false,
-        lv_locked_active  TYPE abap_bool VALUE abap_false,
-        lv_cmxs_active    TYPE abap_bool VALUE abap_false,
-        lv_prev_locked    TYPE abap_bool VALUE abap_false,
-        lv_status_changed TYPE abap_bool VALUE abap_false,
-        lv_teco_cancelled TYPE abap_bool VALUE abap_false,
-        lv_dummy          TYPE jcds-objnr,
-        lv_sts_date       TYPE udate,
-        lv_sts_time       TYPE utime,
-        lv_chg_date       TYPE udate,
-        lv_chg_time       TYPE utime,
-        lv_input_ts       TYPE char14,
-        lv_jcds_ts        TYPE char14,
-        lv_cdhdr_ts       TYPE char14.
+  DATA: lv_obj           TYPE cuobj,
+        lv_value         TYPE atwrt,
+        lv_stat          TYPE jest-stat,
+        lv_vornr         TYPE vornr,
+        lv_objid         TYPE c LENGTH 20,
+        lv_rel_active    TYPE abap_bool VALUE abap_false,
+        lv_teco_active   TYPE abap_bool VALUE abap_false,
+        lv_locked_active TYPE abap_bool VALUE abap_false,
+        lv_cmxs_active   TYPE abap_bool VALUE abap_false,
+        lv_prev_locked   TYPE abap_bool VALUE abap_false,
+        lv_sts_date      TYPE udate,
+        lv_sts_time      TYPE utime,
+        lv_chg_date      TYPE udate,
+        lv_chg_time      TYPE utime,
+        lv_input_ts      TYPE char14,
+        lv_jcds_ts       TYPE char14,
+        lv_cdhdr_ts      TYPE char14.
+
+*---------------------------------------------------------------------*
+*  CRITICAL FIX: Check for duplicate at the very start
+*  Use BINARY SEARCH for better performance
+*---------------------------------------------------------------------*
+  READ TABLE gt_output TRANSPORTING NO FIELDS
+  WITH KEY MaintenanceOrder = ps_order-aufnr
+  BINARY SEARCH.
+  IF sy-subrc = 0.
+    RETURN.  " Already processed this order
+  ENDIF.
 
 *---------------------------------------------------------------------*
 *   Classification (INTERFACE = CMX)
@@ -73,35 +81,22 @@ FORM f_check_status USING ps_order TYPE viaufkst.
     lv_prev_locked = abap_true.
   ENDIF.
 
-  SELECT SINGLE stat
-  FROM jcds
-    INTO @lv_dummy
-  WHERE objnr = @ps_order-objnr
-    AND stat  = 'I0045'
-    AND inact = 'X'
-    AND ( ( udate > @so_date-low )
-       OR ( udate = @so_date-low AND utime > @so_time-low ) ).
-
-  IF sy-subrc = 0.
-    lv_teco_cancelled = abap_true.
-  ENDIF.
-
 *---------------------------------------------------------------------*
 *   Date-Time Range filtering
 *---------------------------------------------------------------------*
   CONCATENATE so_date-low so_time-low INTO lv_input_ts.
   CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
 
-  SELECT SINGLE stat
-    FROM jcds
-    WHERE objnr = @ps_order-objnr
-      AND stat  IN ( 'I0043', 'I0045', 'I0002' )
-      AND ( ( udate > @so_date-low )
-         OR ( udate = @so_date-low AND utime > @so_time-low ) )
-    INTO @lv_stat.
+  SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+  INTO ( @lv_sts_date, @lv_sts_time )
+  FROM jcds
+  WHERE objnr = @ps_order-objnr
+  AND stat IN ( 'I0043', 'I0045', 'I0002' )
+  AND ( ( udate > @so_date-low )
+  OR ( udate = @so_date-low AND utime > @so_time-low ) ).
 
-  IF sy-subrc = 0.
-    lv_status_changed = abap_true.
+  IF sy-subrc = 0 AND lv_sts_date IS NOT INITIAL.
+    CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
   ENDIF.
 
   SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
@@ -116,8 +111,7 @@ FORM f_check_status USING ps_order TYPE viaufkst.
     CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
   ENDIF.
 
-  IF lv_status_changed = abap_false
-  AND lv_cdhdr_ts IS INITIAL.
+  IF lv_jcds_ts IS INITIAL AND lv_cdhdr_ts IS INITIAL.
     RETURN.
   ENDIF.
 
@@ -144,14 +138,6 @@ FORM f_check_status USING ps_order TYPE viaufkst.
       APPEND gs_output TO gt_output.
     ENDIF.
 
-    RETURN.
-  ENDIF.
-
-  IF lv_teco_cancelled = abap_true.
-    lv_stat = 'I0002'. " Back to REL
-    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-    gs_output-msg = 'TECO cancelled – resend order to CPI'.
-    APPEND gs_output TO gt_output.
     RETURN.
   ENDIF.
 
