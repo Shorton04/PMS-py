@@ -1,34 +1,240 @@
+FORM f_check_status USING ps_order TYPE viaufkst.
+
+  DATA: lv_vornr            TYPE vornr,
+        lv_objid            TYPE c LENGTH 20,
+
+        lv_rel_active       TYPE abap_bool VALUE abap_false,
+        lv_teco_active      TYPE abap_bool VALUE abap_false,
+        lv_lkd_active       TYPE abap_bool VALUE abap_false,
+        lv_cmxs_active      TYPE abap_bool VALUE abap_false,
+        lv_cmxc_active      TYPE abap_bool VALUE abap_false,
+
+        lv_has_jcds_change  TYPE abap_bool VALUE abap_false,
+        lv_has_cdhdr_change TYPE abap_bool VALUE abap_false,
+
+        lv_cuobj            TYPE cuobj,
+
+        lv_chg_date         TYPE udate,
+        lv_chg_time         TYPE utime,
+        lv_sts_date         TYPE udate,
+        lv_sts_time         TYPE utime,
+
+        lv_dummy            TYPE jest-stat.
+
 *---------------------------------------------------------------------*
-* Eligibility decision (FINAL – STATUS AWARE)
+* Duplicate protection
 *---------------------------------------------------------------------*
-
-" REL orders
-IF lv_rel_active = abap_true.
-
-  " REL without CMXS → ALWAYS show
-  IF lv_cmxs_active = abap_false.
-    lv_eligible = abap_true.
-
-  " REL with CMXS → only if changed inside window
-  ELSEIF lv_has_cdhdr_change = abap_true
-     OR  lv_has_jcds_change  = abap_true.
-    lv_eligible = abap_true.
-
-  ELSE.
+  READ TABLE gt_output TRANSPORTING NO FIELDS
+    WITH KEY MaintenanceOrder = ps_order-aufnr
+    BINARY SEARCH.
+  IF sy-subrc = 0.
     RETURN.
   ENDIF.
 
-" TECO or LKD orders
-ELSEIF lv_teco_active = abap_true
-    OR lv_locked_active = abap_true.
+*---------------------------------------------------------------------*
+* Detect system statuses (SPECIFIC)
+*---------------------------------------------------------------------*
+  " REL (I0002 ONLY)
+  SELECT SINGLE stat
+    INTO lv_dummy
+    FROM jest
+    WHERE objnr = ps_order-objnr
+      AND stat  = 'I0002'
+      AND inact = ''.
+  IF sy-subrc = 0.
+    lv_rel_active = abap_true.
+  ENDIF.
 
-  " TECO / LKD → ONLY if JCDS inside window
-  IF lv_has_jcds_change = abap_true.
-    lv_eligible = abap_true.
-  ELSE.
+  " TECO
+  SELECT SINGLE stat
+    INTO lv_dummy
+    FROM jest
+    WHERE objnr = ps_order-objnr
+      AND stat  = 'I0045'
+      AND inact = ''.
+  IF sy-subrc = 0.
+    lv_teco_active = abap_true.
+  ENDIF.
+
+  " LOCKED
+  SELECT SINGLE stat
+    INTO lv_dummy
+    FROM jest
+    WHERE objnr = ps_order-objnr
+      AND stat  = 'I0043'
+      AND inact = ''.
+  IF sy-subrc = 0.
+    lv_lkd_active = abap_true.
+  ENDIF.
+
+  " CMXS
+  SELECT SINGLE stat
+    INTO lv_dummy
+    FROM jest
+    WHERE objnr = ps_order-objnr
+      AND stat  = 'E0014'
+      AND inact = ''.
+  IF sy-subrc = 0.
+    lv_cmxs_active = abap_true.
+  ENDIF.
+
+  " CMXC → BLOCK
+  SELECT SINGLE stat
+    INTO lv_dummy
+    FROM jest
+    WHERE objnr = ps_order-objnr
+      AND stat  = 'E0010'
+      AND inact = ''.
+  IF sy-subrc = 0.
+    lv_cmxc_active = abap_true.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Allow only REL / TECO / LKD
+*---------------------------------------------------------------------*
+  IF lv_rel_active = abap_false
+ AND lv_teco_active = abap_false
+ AND lv_lkd_active  = abap_false.
     RETURN.
   ENDIF.
 
-ELSE.
-  RETURN.
-ENDIF.
+*---------------------------------------------------------------------*
+* CMXC blocks processing
+*---------------------------------------------------------------------*
+  IF lv_cmxc_active = abap_true.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* INTERFACE = CMX classification
+*---------------------------------------------------------------------*
+  CLEAR lv_cuobj.
+
+  IF ps_order-equnr IS NOT INITIAL.
+    SELECT SINGLE cuobj
+      INTO lv_cuobj
+      FROM inob
+      WHERE objek = ps_order-equnr.
+  ELSEIF ps_order-tplnr IS NOT INITIAL.
+    SELECT SINGLE cuobj
+      INTO lv_cuobj
+      FROM inob
+      WHERE objek = ps_order-tplnr.
+  ENDIF.
+
+  IF lv_cuobj IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT SINGLE atwrt
+    INTO @DATA(lv_char)
+    FROM ausp
+    WHERE objek = lv_cuobj
+      AND atinn = gv_atinn
+      AND atwrt = 'CMX'.
+
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* Build CDHDR object id
+*---------------------------------------------------------------------*
+  CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
+
+*---------------------------------------------------------------------*
+* CDHDR delta detection (REL logic)
+*---------------------------------------------------------------------*
+  SELECT MAX( udate ),
+         MAX( utime )
+    INTO ( lv_chg_date, lv_chg_time )
+    FROM cdhdr
+    WHERE objectclas = 'ORDER'
+      AND objectid   = lv_objid.
+
+  IF lv_chg_date IS NOT INITIAL AND
+     ( lv_chg_date > so_date-low
+       OR ( lv_chg_date = so_date-low AND lv_chg_time >= so_time-low ) )
+ AND
+     ( lv_chg_date < so_date-high
+       OR ( lv_chg_date = so_date-high AND lv_chg_time <= so_time-high ) ).
+    lv_has_cdhdr_change = abap_true.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* JCDS delta detection (TECO / LKD only)
+*---------------------------------------------------------------------*
+  IF lv_teco_active = abap_true OR lv_lkd_active = abap_true.
+
+    SELECT MAX( udate ),
+           MAX( utime )
+      INTO ( lv_sts_date, lv_sts_time )
+      FROM jcds
+      WHERE objnr = ps_order-objnr
+        AND stat IN ( 'I0045', 'I0043' ).
+
+    IF lv_sts_date IS NOT INITIAL AND
+       ( lv_sts_date > so_date-low
+         OR ( lv_sts_date = so_date-low AND lv_sts_time >= so_time-low ) )
+   AND
+       ( lv_sts_date < so_date-high
+         OR ( lv_sts_date = so_date-high AND lv_sts_time <= so_time-high ) ).
+      lv_has_jcds_change = abap_true.
+    ELSE.
+      RETURN.
+    ENDIF.
+
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* REL handling
+*---------------------------------------------------------------------*
+  IF lv_rel_active = abap_true.
+
+    PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
+
+    IF lv_cmxs_active = abap_false.
+      PERFORM f_prepare_output USING ps_order lv_vornr 'I0002'.
+      gs_output-msg = 'REL without CMXS – initial release (send BAPI + CMX)'.
+      APPEND gs_output TO gt_output.
+      SORT gt_output BY MaintenanceOrder.
+      RETURN.
+
+    ELSEIF lv_has_cdhdr_change = abap_true.
+      PERFORM f_prepare_output USING ps_order lv_vornr 'I0002'.
+      gs_output-msg = 'REL with CMXS – header changed (resend CMX)'.
+      APPEND gs_output TO gt_output.
+      SORT gt_output BY MaintenanceOrder.
+      RETURN.
+
+    ELSE.
+      RETURN.
+    ENDIF.
+
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* TECO handling
+*---------------------------------------------------------------------*
+  IF lv_teco_active = abap_true.
+    PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
+    PERFORM f_prepare_output USING ps_order lv_vornr 'I0045'.
+    gs_output-msg = 'TECO – status change inside window (send CMX only)'.
+    APPEND gs_output TO gt_output.
+    SORT gt_output BY MaintenanceOrder.
+    RETURN.
+  ENDIF.
+
+*---------------------------------------------------------------------*
+* LKD handling
+*---------------------------------------------------------------------*
+  IF lv_lkd_active = abap_true.
+    PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
+    PERFORM f_prepare_output USING ps_order lv_vornr 'I0043'.
+    gs_output-msg = 'Locked – status change inside window (send CMX only)'.
+    APPEND gs_output TO gt_output.
+    SORT gt_output BY MaintenanceOrder.
+    RETURN.
+  ENDIF.
+
+ENDFORM.
