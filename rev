@@ -1,16 +1,34 @@
 *---------------------------------------------------------------------*
-* Eligibility decision (FINAL RULE)
+* Eligibility decision (FINAL – STATUS AWARE)
 *---------------------------------------------------------------------*
-* 1. Orders WITHOUT CMXS → ALWAYS eligible
-* 2. Orders WITH CMXS    → eligible ONLY if changed inside window
-*---------------------------------------------------------------------*
-IF lv_cmxs_active = abap_false.
-  lv_eligible = abap_true.
 
-ELSEIF lv_has_cdhdr_change = abap_true
-   OR  lv_has_jcds_change  = abap_true.
-  lv_eligible = abap_true.
+" REL orders
+IF lv_rel_active = abap_true.
+
+  " REL without CMXS → ALWAYS show
+  IF lv_cmxs_active = abap_false.
+    lv_eligible = abap_true.
+
+  " REL with CMXS → only if changed inside window
+  ELSEIF lv_has_cdhdr_change = abap_true
+     OR  lv_has_jcds_change  = abap_true.
+    lv_eligible = abap_true.
+
+  ELSE.
+    RETURN.
+  ENDIF.
+
+" TECO or LKD orders
+ELSEIF lv_teco_active = abap_true
+    OR lv_locked_active = abap_true.
+
+  " TECO / LKD → ONLY if JCDS inside window
+  IF lv_has_jcds_change = abap_true.
+    lv_eligible = abap_true.
+  ELSE.
+    RETURN.
+  ENDIF.
 
 ELSE.
-  RETURN. " CMXS + no changes → skip
+  RETURN.
 ENDIF.
