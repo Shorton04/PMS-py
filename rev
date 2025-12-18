@@ -69,12 +69,11 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
 
 *---------------------------------------------------------------------*
-*   Check for JCDS changes within the window
+*   Check for JCDS changes within the window (for TECO and LOCKED only)
 *---------------------------------------------------------------------*
-  " Check for any status changes (TECO, LOCKED, REL, UNLOCK, TECO CANCELLED) in window
   SELECT SINGLE * FROM jcds
   WHERE objnr = @ps_order-objnr
-  AND stat IN ( 'I0043', 'I0045', 'I0002' )
+  AND stat IN ( 'I0043', 'I0045' )
   AND ( ( udate > @so_date-low )
      OR ( udate = @so_date-low AND utime >= @so_time-low ) )
   INTO @DATA(ls_jcds_change).
@@ -100,126 +99,77 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   ENDIF.
 
 *---------------------------------------------------------------------*
-*   If no changes in window, skip this order
-*---------------------------------------------------------------------*
-  IF lv_has_jcds_change = abap_false AND lv_has_cdhdr_change = abap_false.
-    RETURN.
-  ENDIF.
-
-*---------------------------------------------------------------------*
 *   Get operation
 *---------------------------------------------------------------------*
   PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
 
 *---------------------------------------------------------------------*
-*   Determine the change type for better tracking
-*---------------------------------------------------------------------*
-  IF lv_has_jcds_change = abap_true.
-    " Determine what kind of status change occurred
-    DATA: lt_jcds_details TYPE TABLE OF jcds.
-    
-    SELECT * FROM jcds
-    WHERE objnr = @ps_order-objnr
-    AND stat IN ( 'I0043', 'I0045', 'I0002' )
-    AND ( ( udate > @so_date-low )
-       OR ( udate = @so_date-low AND utime >= @so_time-low ) )
-    ORDER BY udate DESCENDING, utime DESCENDING, chgnr DESCENDING
-    INTO TABLE @lt_jcds_details.
-
-    " Get the most recent change
-    READ TABLE lt_jcds_details INDEX 1 INTO DATA(ls_latest_change).
-    IF sy-subrc = 0.
-      CASE ls_latest_change-stat.
-        WHEN 'I0043'. " Locked
-          IF ls_latest_change-inact = ''. " Activated = Locked
-            lv_change_type = 'LOCKED'.
-          ELSE. " Deactivated = Unlocked
-            lv_change_type = 'UNLOCKED'.
-          ENDIF.
-        WHEN 'I0045'. " TECO
-          IF ls_latest_change-inact = ''. " Activated = TECO
-            lv_change_type = 'TECO'.
-          ELSE. " Deactivated = TECO Cancelled
-            lv_change_type = 'TECO_CANCELLED'.
-          ENDIF.
-        WHEN 'I0002'. " REL
-          IF ls_latest_change-inact = ''. " Activated = Released
-            lv_change_type = 'RELEASED'.
-          ENDIF.
-      ENDCASE.
-    ENDIF.
-  ENDIF.
-
-  IF lv_has_cdhdr_change = abap_true AND lv_change_type IS INITIAL.
-    lv_change_type = 'CDHDR_CHANGE'.
-  ENDIF.
-
-*---------------------------------------------------------------------*
 *   Business Logic - Send to CPI based on current status
 *---------------------------------------------------------------------*
 
-  " Determine current status for output
+  " 1. LOCKED - must have JCDS change in window to be sent
   IF lv_locked_active = abap_true.
+    IF lv_has_jcds_change = abap_false.
+      RETURN. " No change in window, skip
+    ENDIF.
+    
     lv_stat = 'I0043'.
-    
-    IF lv_cmxs_active = abap_true.
-      PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-      gs_output-msg = |{ lv_change_type } - Locked with CMXS – send to CMX (skip BAPI)|.
-      APPEND gs_output TO gt_output.
-    ELSE.
-      PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-      gs_output-msg = |{ lv_change_type } - Locked without CMXS – send to BAPI and CMX|.
-      APPEND gs_output TO gt_output.
-    ENDIF.
-
-  ELSEIF lv_teco_active = abap_true.
-    lv_stat = 'I0045'.
-    
-    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-    IF lv_cmxs_active = abap_true.
-      gs_output-msg = |{ lv_change_type } - TECO with CMXS – send to CMX (skip BAPI)|.
-    ELSE.
-      gs_output-msg = |{ lv_change_type } - TECO without CMXS – send to BAPI and CMX|.
-    ENDIF.
-    APPEND gs_output TO gt_output.
-
-  ELSEIF lv_rel_active = abap_true.
-    lv_stat = 'I0002'.
-    
     PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
     
-    " Build message based on change type
-    CASE lv_change_type.
-      WHEN 'TECO_CANCELLED'.
-        IF lv_cmxs_active = abap_true.
-          gs_output-msg = 'TECO Cancelled with CMXS – send to BAPI and CMX'.
-        ELSE.
-          gs_output-msg = 'TECO Cancelled without CMXS – send to BAPI and CMX'.
-        ENDIF.
-      WHEN 'UNLOCKED'.
-        IF lv_cmxs_active = abap_true.
-          gs_output-msg = 'Unlocked with CMXS – send to BAPI and CMX'.
-        ELSE.
-          gs_output-msg = 'Unlocked without CMXS – send to BAPI and CMX'.
-        ENDIF.
-      WHEN 'CDHDR_CHANGE'.
-        IF lv_cmxs_active = abap_true.
-          gs_output-msg = 'CDHDR changes with CMXS – send to BAPI and CMX'.
-        ELSE.
-          gs_output-msg = 'CDHDR changes without CMXS – send to BAPI and CMX'.
-        ENDIF.
-      WHEN OTHERS.
-        IF lv_cmxs_active = abap_true.
-          gs_output-msg = |{ lv_change_type } - REL with CMXS – send to BAPI and CMX|.
-        ELSE.
-          gs_output-msg = |{ lv_change_type } - REL without CMXS – send to BAPI and CMX|.
-        ENDIF.
-    ENDCASE.
-    
+    IF lv_cmxs_active = abap_true.
+      gs_output-msg = 'Locked with CMXS – send to CMX (skip BAPI)'.
+    ELSE.
+      gs_output-msg = 'Locked without CMXS – send to BAPI and CMX'.
+    ENDIF.
     APPEND gs_output TO gt_output.
+    SORT gt_output BY MaintenanceOrder.
+    RETURN.
   ENDIF.
 
-  " Sort after append for binary search
-  SORT gt_output BY MaintenanceOrder.
+  " 2. TECO - must have JCDS change in window to be sent
+  IF lv_teco_active = abap_true.
+    IF lv_has_jcds_change = abap_false.
+      RETURN. " No change in window, skip
+    ENDIF.
+    
+    lv_stat = 'I0045'.
+    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+    
+    IF lv_cmxs_active = abap_true.
+      gs_output-msg = 'TECO with CMXS – send to CMX (skip BAPI)'.
+    ELSE.
+      gs_output-msg = 'TECO without CMXS – send to BAPI and CMX'.
+    ENDIF.
+    APPEND gs_output TO gt_output.
+    SORT gt_output BY MaintenanceOrder.
+    RETURN.
+  ENDIF.
+
+  " 3. REL - Different logic based on CMXS
+  IF lv_rel_active = abap_true.
+    lv_stat = 'I0002'.
+    
+    " If REL has NO CMXS: always send (replacement for unlock/teco cancelled)
+    IF lv_cmxs_active = abap_false.
+      PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+      gs_output-msg = 'REL without CMXS – send to BAPI and CMX'.
+      APPEND gs_output TO gt_output.
+      SORT gt_output BY MaintenanceOrder.
+      RETURN.
+    ENDIF.
+    
+    " If REL has CMXS: only send if CDHDR change in window
+    IF lv_cmxs_active = abap_true.
+      IF lv_has_cdhdr_change = abap_false.
+        RETURN. " No CDHDR change in window, ignore
+      ENDIF.
+      
+      PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+      gs_output-msg = 'REL with CMXS and CDHDR changes – send to BAPI and CMX'.
+      APPEND gs_output TO gt_output.
+      SORT gt_output BY MaintenanceOrder.
+      RETURN.
+    ENDIF.
+  ENDIF.
 
 ENDFORM.
