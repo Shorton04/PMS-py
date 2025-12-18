@@ -1,36 +1,47 @@
-CLEAR: lv_sts_date, lv_sts_time, lv_jcds_ts.
+DATA: lv_status_changed TYPE abap_bool VALUE abap_false.
 
-SELECT udate, utime
+SELECT SINGLE stat
   FROM jcds
- WHERE objnr = @ps_order-objnr
-   AND stat IN ( 'I0043', 'I0045', 'I0002' )
-   " DO NOT filter INACT — reversals live there
-   AND ( ( udate > @so_date-low )
-      OR ( udate = @so_date-low AND utime >= @so_time-low ) )
- ORDER BY udate DESCENDING, utime DESCENDING
- INTO ( @lv_sts_date, @lv_sts_time )
- UP TO 1 ROWS.
-ENDSELECT.
+  WHERE objnr = @ps_order-objnr
+    AND stat  IN ( 'I0043', 'I0045', 'I0002' )
+    AND ( ( udate > @so_date-low )
+       OR ( udate = @so_date-low AND utime > @so_time-low ) )
+  INTO @lv_stat.
 
 IF sy-subrc = 0.
-  CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
+  lv_status_changed = abap_true.
 ENDIF.
 
 
 
-CLEAR: lv_chg_date, lv_chg_time, lv_cdhdr_ts.
+DATA lv_teco_cancelled TYPE abap_bool VALUE abap_false.
 
-SELECT udate, utime
-  FROM cdhdr
- WHERE objectclas = 'ORDER'
-   AND objectid   = @lv_objid
-   AND ( ( udate > @so_date-low )
-      OR ( udate = @so_date-low AND utime >= @so_time-low ) )
- ORDER BY udate DESCENDING, utime DESCENDING
- INTO ( @lv_chg_date, @lv_chg_time )
- UP TO 1 ROWS.
-ENDSELECT.
+SELECT SINGLE stat
+  FROM jcds
+  WHERE objnr = @ps_order-objnr
+    AND stat  = 'I0045'
+    AND inact = 'X'
+    AND ( ( udate > @so_date-low )
+       OR ( udate = @so_date-low AND utime > @so_time-low ) ).
 
 IF sy-subrc = 0.
-  CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
+  lv_teco_cancelled = abap_true.
+ENDIF.
+
+
+
+
+IF lv_status_changed = abap_false
+AND lv_cdhdr_ts IS INITIAL.
+  RETURN.
+ENDIF.
+
+
+
+IF lv_teco_cancelled = abap_true.
+  lv_stat = 'I0002'. " Back to REL
+  PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
+  gs_output-msg = 'TECO cancelled – resend order to CPI'.
+  APPEND gs_output TO gt_output.
+  RETURN.
 ENDIF.
