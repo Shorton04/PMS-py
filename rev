@@ -4,6 +4,7 @@ SELECT udate, utime
   FROM jcds
  WHERE objnr = @ps_order-objnr
    AND stat IN ( 'I0043', 'I0045', 'I0002' )
+   " DO NOT filter INACT — reversals live there
    AND ( ( udate > @so_date-low )
       OR ( udate = @so_date-low AND utime >= @so_time-low ) )
  ORDER BY udate DESCENDING, utime DESCENDING
@@ -32,14 +33,4 @@ ENDSELECT.
 
 IF sy-subrc = 0.
   CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
-ENDIF.
-
-
-
-IF lv_jcds_ts IS NOT INITIAL AND lv_cdhdr_ts IS NOT INITIAL.
-  gs_output-msg = 'JCDS + CDHDR change detected – resend to CPI'.
-ELSEIF lv_jcds_ts IS NOT INITIAL.
-  gs_output-msg = 'System status change detected (JCDS) – resend to CPI'.
-ELSE.
-  gs_output-msg = 'Header change detected (CDHDR) – resend to CPI'.
 ENDIF.
