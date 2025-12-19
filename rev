@@ -1,8 +1,18 @@
+CLEAR: lv_jcds_ts, lv_cdhdr_ts, lv_in_window.
+
+" ==========================================================
+" STATUS PRIORITY:
+" 1. LKD
+" 2. TECO
+" 3. REL
+" ==========================================================
+
+" =======================
+" CASE 1: LOCKED (LKD)
+" =======================
 IF lv_locked_active = abap_true.
 
-  CLEAR lv_in_window.
-
-  " LKD must be inside window (JCDS)
+  " Get latest LKD activation timestamp
   SELECT udate, utime
     INTO ( @lv_sts_date, @lv_sts_time )
     FROM jcds
@@ -13,7 +23,7 @@ IF lv_locked_active = abap_true.
     UP TO 1 ROWS.
   ENDSELECT.
 
-  " Outside window → ignore
+  " No LKD change or outside window → IGNORE
   IF sy-subrc <> 0
      OR lv_sts_date < so_date-low
      OR ( lv_sts_date = so_date-low AND lv_sts_time < so_time-low ).
@@ -23,11 +33,12 @@ IF lv_locked_active = abap_true.
   lv_in_window = abap_true.
 
 
+" =======================
+" CASE 2: TECO
+" =======================
 ELSEIF lv_teco_active = abap_true.
 
-  CLEAR lv_in_window.
-
-  " TECO must be inside window (JCDS)
+  " Get latest TECO activation timestamp
   SELECT udate, utime
     INTO ( @lv_sts_date, @lv_sts_time )
     FROM jcds
@@ -38,10 +49,42 @@ ELSEIF lv_teco_active = abap_true.
     UP TO 1 ROWS.
   ENDSELECT.
 
+  " No TECO change or outside window → IGNORE
   IF sy-subrc <> 0
      OR lv_sts_date < so_date-low
      OR ( lv_sts_date = so_date-low AND lv_sts_time < so_time-low ).
     RETURN.
   ENDIF.
 
-  lv_in_window = abap_true
+  lv_in_window = abap_true.
+
+
+" =======================
+" CASE 3: RELEASED (REL)
+" =======================
+ELSEIF lv_rel_active = abap_true.
+
+  IF lv_cmxs_active = abap_true.
+
+    " REL + CMXS → check CDHDR inside window
+    SELECT MAX( udate ) AS max_date,
+           MAX( utime ) AS max_time
+      INTO ( @lv_chg_date, @lv_chg_time )
+      FROM cdhdr
+      WHERE objectclas = 'ORDER'
+        AND objectid   = @lv_objid
+        AND ( ( udate > @so_date-low )
+           OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+
+    IF lv_chg_date IS INITIAL.
+      RETURN.
+    ENDIF.
+
+    lv_in_window = abap_true.
+
+  ELSE.
+    " REL without CMXS → ALWAYS include
+    lv_in_window = abap_true.
+  ENDIF.
+
+ENDIF.
