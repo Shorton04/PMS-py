@@ -12,6 +12,7 @@ FORM f_check_status USING ps_order TYPE viaufkst.
         lv_cmxc_active   TYPE abap_bool VALUE abap_false,
         lv_prev_locked   TYPE abap_bool VALUE abap_false,
         lv_prev_teco     TYPE abap_bool VALUE abap_false,
+        lv_is_cmx_int    TYPE abap_bool VALUE abap_false,
         lv_sts_date      TYPE udate,
         lv_sts_time      TYPE utime,
         lv_chg_date      TYPE udate,
@@ -37,7 +38,7 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   IF lv_obj IS INITIAL AND ps_order-tplnr IS NOT INITIAL.
     SELECT SINGLE cuobj INTO @lv_obj FROM inob WHERE objek = @ps_order-tplnr.
   ENDIF.
-  IF lv_obj IS INITIAL.
+  IF lv_obj IS INITIAL AND lv_cmxs_active = abap_true.
     RETURN.
   ENDIF.
 
