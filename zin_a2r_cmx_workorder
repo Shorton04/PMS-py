@@ -1,157 +1,3 @@
-* ====================================================================
-* RICEFW ID.........: 7292
-* TR Number.........: D30K903830
-* Version...........: 1.0
-* Program...........: ZIN_A2R_CMX_WORKORDER
-* Transaction Code..: SE38
-* Author............: hq75177
-* Date..............: 22.10.2025 - 14:47:18
-* --------------------------------------------------------------------
-* Description.......: Program for Updating userstatus (CMXS)
-*                      and sending of orders in a json format to cpi
-* --------------------------------------------------------------------
-* Modification list.:
-* Date      Author    TR Number          Description
-* 10/22/25  HQ75177   D30K906846         Review point.
-* ====================================================================
-
-REPORT zin_a2r_cmx_workorder.
-
-*----------------------------------------------------------------------*
-*                           Includes                                   *
-*----------------------------------------------------------------------*
-INCLUDE zin_a2r_cmx_workorder_top.
-INCLUDE zin_a2r_cmx_workorder_sel.
-INCLUDE zin_a2r_cmx_workorder_f01.
-
-*-------------------------------------------------------------*
-*  Default Time
-*-------------------------------------------------------------*
-INITIALIZATION.
-PERFORM f_default_time.
-
-*-------------------------------------------------------------*
-*  START-OF-SELECTION
-*-------------------------------------------------------------*
-START-OF-SELECTION.
-
-  PERFORM f_get_orders.          "Fetch orders
-  PERFORM f_prefetch_data.       "Prefetch master data
-  PERFORM f_process_orders.      "Apply logic and filtering
-
-*-------------------------------------------------------------*
-*  END-OF-SELECTION
-*-------------------------------------------------------------*
-END-OF-SELECTION.
-PERFORM f_execute_main.
-
-*&---------------------------------------------------------------------*
-*& Include          ZIN_A2R_CMX_WORKORDER_TOP
-*&---------------------------------------------------------------------*
-
-CONSTANTS:
-  c_stat_rel  TYPE jest-stat VALUE 'I0002',   "Released
-  c_stat_teco TYPE jest-stat VALUE 'I0045',   "Technically Completed
-  c_stat_lkd  TYPE jest-stat VALUE 'I0043',   "Locked
-  c_stat_cmxc TYPE jest-stat VALUE 'E0010',   "CMX Confirmed
-  c_stat_cmxs TYPE jest-stat VALUE 'E0014'.   "Sent to CMX
-
-
-*---------------------------------------------------------------------*
-* Type Definitions
-*---------------------------------------------------------------------*
-
-"--- Output structure for ALV display
-TYPES: BEGIN OF ty_output,
-         OrderMessageStatus        TYPE char10,
-         Plant                     TYPE werks_d,
-         MaintenanceOrder          TYPE aufnr,
-         MaintenanceOrderOperation TYPE vornr,
-         SystemStatusText          TYPE char40,
-         TechnicalObject           TYPE char30,
-         MaintOrdBasicStartDate    TYPE viaufkst-gstrp,
-         MaintOrdBasicEndDate      TYPE viaufkst-gltrp,
-         LatestAcceptableComplDate TYPE viaufkst-lacd_date,
-         SystemId                  TYPE sy-sysid,
-         Msg                       TYPE char72,
-       END OF ty_output.
-
-"--- Prefetch helper structures
-TYPES: BEGIN OF ty_jest_data,
-         objnr TYPE jest-objnr,
-         stat  TYPE jest-stat,
-         inact TYPE jest-inact,
-       END OF ty_jest_data.
-
-TYPES: BEGIN OF ty_inob_data,
-         objek TYPE inob-objek,
-         cuobj TYPE inob-cuobj,
-       END OF ty_inob_data.
-
-TYPES: BEGIN OF ty_ausp_data,
-         objek TYPE ausp-objek,
-         atinn TYPE ausp-atinn,
-         atwrt TYPE ausp-atwrt,
-       END OF ty_ausp_data.
-
-TYPES: BEGIN OF ty_cdhdr_data,
-         objectid TYPE cdhdr-objectid,
-         udate    TYPE cdhdr-udate,
-         utime    TYPE cdhdr-utime,
-       END OF ty_cdhdr_data.
-
-
-*---------------------------------------------------------------------*
-* Data Declarations
-*---------------------------------------------------------------------*
-
-"--- Main output
-DATA: gt_output TYPE TABLE OF ty_output,
-      gs_output TYPE ty_output.
-
-"--- Orders
-DATA: gt_orders TYPE TABLE OF viaufkst,
-      gs_order  TYPE viaufkst.
-
-"--- Prefetched master data tables
-DATA: gt_jest  TYPE TABLE OF ty_jest_data,
-      gs_jest  TYPE ty_jest_data,
-      gt_inob  TYPE TABLE OF ty_inob_data,
-      gs_inob  TYPE ty_inob_data,
-      gt_ausp  TYPE TABLE OF ty_ausp_data,
-      gs_ausp  TYPE ty_ausp_data,
-      gt_cdhdr TYPE TABLE OF ty_cdhdr_data,
-      gs_cdhdr TYPE ty_cdhdr_data.
-
-"--- Misc
-DATA: gv_atinn TYPE atinn.   "INTERFACE characteristic ID
-
-*&---------------------------------------------------------------------*
-*& Include          ZIN_A2R_CMX_WORKORDER_SEL
-*&---------------------------------------------------------------------*
-TABLES: viaufkst, afvc, jest, cabn, ausp, inob, cdhdr, tj02t.
-
-SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
-
-  SELECT-OPTIONS: so_werks FOR viaufkst-iwerk OBLIGATORY,   "Plant
-                  so_auart FOR viaufkst-auart OBLIGATORY,   "Order Type
-                  so_aufnr FOR viaufkst-aufnr,              "Order Number
-                  so_date  FOR sy-datum NO-EXTENSION,       "Check from Date
-                  so_time  FOR sy-uzeit NO-EXTENSION.       "Check from Time
-
-  PARAMETERS: p_test      AS CHECKBOX DEFAULT ''.   "Test Run Flag
-
-SELECTION-SCREEN END OF BLOCK b1.
-
-INITIALIZATION.
-  " Default to current date/time
-  so_date-low = sy-datum.
-  so_date-high = sy-datum.
-  so_time-low = sy-uzeit.
-  so_time-high = sy-uzeit.
-  so_date-sign = 'I'.
-  so_date-option = 'EQ'.
-  APPEND so_date.
 *&---------------------------------------------------------------------*
 *& Include          ZIN_A2R_CMX_WORKORDER_F01
 *&---------------------------------------------------------------------*
@@ -345,7 +191,9 @@ FORM f_check_status USING ps_order TYPE viaufkst.
         lv_teco_active   TYPE abap_bool VALUE abap_false,
         lv_locked_active TYPE abap_bool VALUE abap_false,
         lv_cmxs_active   TYPE abap_bool VALUE abap_false,
+        lv_cmxc_active   TYPE abap_bool VALUE abap_false,
         lv_prev_locked   TYPE abap_bool VALUE abap_false,
+        lv_prev_teco     TYPE abap_bool VALUE abap_false,
         lv_sts_date      TYPE udate,
         lv_sts_time      TYPE utime,
         lv_chg_date      TYPE udate,
@@ -402,12 +250,21 @@ FORM f_check_status USING ps_order TYPE viaufkst.
   IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
 
   SELECT SINGLE stat FROM jest INTO @lv_stat
-  WHERE objnr = @ps_order-objnr AND stat = 'E0010' AND inact = ''.
+  WHERE objnr = @ps_order-objnr AND stat = 'E0014' AND inact = ''.
   IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
+
+  SELECT SINGLE stat FROM jest INTO @lv_stat
+  WHERE objnr = @ps_order-objnr AND stat = 'E0010' AND inact = ''.
+  IF sy-subrc = 0. lv_cmxc_active = abap_true. ENDIF.
+
 
 *---------------------------------------------------------------------*
 *   Check if order was previously locked
 *---------------------------------------------------------------------*
+  IF lv_cmxc_active = abap_true.
+    RETURN.
+  ENDIF.
+
   SELECT SINGLE * FROM jcds
   WHERE objnr = @ps_order-objnr
   AND stat  = 'I0043'
@@ -417,6 +274,14 @@ FORM f_check_status USING ps_order TYPE viaufkst.
     lv_prev_locked = abap_true.
   ENDIF.
 
+  SELECT SINGLE * FROM jcds
+  WHERE objnr = @ps_order-objnr
+  AND stat  = 'I0045'
+  AND inact = 'X'
+  INTO @DATA(ls_prev_teco).
+  IF sy-subrc = 0.
+    lv_prev_teco = abap_true.
+  ENDIF.
 *---------------------------------------------------------------------*
 *   Date-Time Range filtering
 *---------------------------------------------------------------------*
@@ -497,6 +362,13 @@ FORM f_check_status USING ps_order TYPE viaufkst.
         gs_output-msg = 'Unlocked REL with CMXS – send to CMX only'.
       ELSE.
         gs_output-msg = 'Unlocked REL without CMXS – send to BAPI and CMX'.
+      ENDIF.
+
+    ELSEIF lv_prev_teco = abap_true. " recently unlocked
+      IF lv_cmxs_active = abap_true.
+        gs_output-msg = 'TECO Cancelled REL with CMXS – send to CMX only'.
+      ELSE.
+        gs_output-msg = 'TECO Cancelled REL without CMXS – send to BAPI and CMX'.
       ENDIF.
 
     ELSE. "normal REL
