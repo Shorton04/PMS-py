@@ -1,90 +1,66 @@
 CLEAR: lv_jcds_ts, lv_cdhdr_ts, lv_in_window.
 
-" ==========================================================
-" STATUS PRIORITY:
-" 1. LKD
-" 2. TECO
-" 3. REL
-" ==========================================================
-
-" =======================
-" CASE 1: LOCKED (LKD)
-" =======================
-IF lv_locked_active = abap_true.
-
-  " Get latest LKD activation timestamp
-  SELECT udate, utime
-    INTO ( @lv_sts_date, @lv_sts_time )
-    FROM jcds
-    WHERE objnr = @ps_order-objnr
-      AND stat  = 'I0043'
-      AND inact = ''
-    ORDER BY udate DESCENDING utime DESCENDING
-    UP TO 1 ROWS.
-  ENDSELECT.
-
-  " No LKD change or outside window → IGNORE
-  IF sy-subrc <> 0
-     OR lv_sts_date < so_date-low
-     OR ( lv_sts_date = so_date-low AND lv_sts_time < so_time-low ).
-    RETURN.
-  ENDIF.
-
-  lv_in_window = abap_true.
+  " === CASE 1: REL orders ===
+  IF lv_rel_active = abap_true.
 
 
-" =======================
-" CASE 2: TECO
-" =======================
-ELSEIF lv_teco_active = abap_true.
-
-  " Get latest TECO activation timestamp
-  SELECT udate, utime
-    INTO ( @lv_sts_date, @lv_sts_time )
-    FROM jcds
-    WHERE objnr = @ps_order-objnr
-      AND stat  = 'I0045'
-      AND inact = ''
-    ORDER BY udate DESCENDING utime DESCENDING
-    UP TO 1 ROWS.
-  ENDSELECT.
-
-  " No TECO change or outside window → IGNORE
-  IF sy-subrc <> 0
-     OR lv_sts_date < so_date-low
-     OR ( lv_sts_date = so_date-low AND lv_sts_time < so_time-low ).
-    RETURN.
-  ENDIF.
-
-  lv_in_window = abap_true.
-
-
-" =======================
-" CASE 3: RELEASED (REL)
-" =======================
-ELSEIF lv_rel_active = abap_true.
-
-  IF lv_cmxs_active = abap_true.
-
-    " REL + CMXS → check CDHDR inside window
-    SELECT MAX( udate ) AS max_date,
-           MAX( utime ) AS max_time
+    IF lv_cmxs_active = abap_true.
+      " REL with CMXS: Check if header changes (CDHDR) are in window
+      SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
       INTO ( @lv_chg_date, @lv_chg_time )
       FROM cdhdr
       WHERE objectclas = 'ORDER'
-        AND objectid   = @lv_objid
-        AND ( ( udate > @so_date-low )
-           OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+      AND objectid   = @lv_objid
+      AND ( ( udate > @so_date-low )
+      OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
 
-    IF lv_chg_date IS INITIAL.
-      RETURN.
+      IF sy-subrc = 0 AND lv_chg_date IS NOT INITIAL.
+        CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
+        lv_in_window = abap_true.
+      ENDIF.
+
+    ELSE.
+      " REL without CMXS: Always include (no window check needed)
+      lv_in_window = abap_true.
     ENDIF.
 
-    lv_in_window = abap_true.
 
-  ELSE.
-    " REL without CMXS → ALWAYS include
-    lv_in_window = abap_true.
+    " === CASE 2: LOCKED orders ===
+  ELSEIF lv_locked_active = abap_true.
+
+
+    " LOCKED: Check if status change (JCDS) for I0043 is in window
+    SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+    INTO ( @lv_sts_date, @lv_sts_time )
+    FROM jcds
+    WHERE objnr = @ps_order-objnr
+    AND stat = 'I0043'
+    AND ( ( udate > @so_date-low )
+    OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+
+    IF sy-subrc = 0 AND lv_sts_date IS NOT INITIAL.
+      CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
+      lv_in_window = abap_true.
+    ENDIF.
+
+
+    " === CASE 3: TECO orders ===
+  ELSEIF lv_teco_active = abap_true.
+
+
+    " TECO: Check if status change (JCDS) for I0045 is in window
+    SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+    INTO ( @lv_sts_date, @lv_sts_time )
+    FROM jcds
+    WHERE objnr = @ps_order-objnr
+    AND stat = 'I0045'
+    AND ( ( udate > @so_date-low )
+    OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+
+    IF sy-subrc = 0 AND lv_sts_date IS NOT INITIAL.
+      CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
+      lv_in_window = abap_true.
+    ENDIF.
+
+
   ENDIF.
-
-ENDIF.
