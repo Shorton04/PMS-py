@@ -1,239 +1,47 @@
-FORM f_check_status USING ps_order TYPE viaufkst.
+IF lv_locked_active = abap_true.
 
-  DATA: lv_obj           TYPE cuobj,
-        lv_value         TYPE atwrt,
-        lv_stat          TYPE jest-stat,
-        lv_vornr         TYPE vornr,
-        lv_objid         TYPE c LENGTH 20,
-        lv_rel_active    TYPE abap_bool VALUE abap_false,
-        lv_teco_active   TYPE abap_bool VALUE abap_false,
-        lv_locked_active TYPE abap_bool VALUE abap_false,
-        lv_cmxs_active   TYPE abap_bool VALUE abap_false,
-        lv_cmxc_active   TYPE abap_bool VALUE abap_false,
-        lv_prev_locked   TYPE abap_bool VALUE abap_false,
-        lv_prev_teco     TYPE abap_bool VALUE abap_false,
-        lv_is_cmx_int    TYPE abap_bool VALUE abap_false,
-        lv_sts_date      TYPE udate,
-        lv_sts_time      TYPE utime,
-        lv_chg_date      TYPE udate,
-        lv_chg_time      TYPE utime,
-        lv_input_ts      TYPE char14,
-        lv_jcds_ts       TYPE char14,
-        lv_cdhdr_ts      TYPE char14,
-        lv_in_window     TYPE abap_bool VALUE abap_false.
+  CLEAR lv_in_window.
 
-
-  READ TABLE gt_output TRANSPORTING NO FIELDS
-  WITH KEY MaintenanceOrder = ps_order-aufnr
-  BINARY SEARCH.
-  IF sy-subrc = 0.
-    RETURN.  " Already processed this order
-  ENDIF.
-
-
-  CLEAR lv_obj.
-  IF ps_order-equnr IS NOT INITIAL.
-    SELECT SINGLE cuobj INTO @lv_obj FROM inob WHERE objek = @ps_order-equnr.
-  ENDIF.
-  IF lv_obj IS INITIAL AND ps_order-tplnr IS NOT INITIAL.
-    SELECT SINGLE cuobj INTO @lv_obj FROM inob WHERE objek = @ps_order-tplnr.
-  ENDIF.
-  IF lv_obj IS INITIAL AND lv_cmxs_active = abap_true.
-    RETURN.
-  ENDIF.
-
-  SELECT SINGLE atwrt INTO @lv_value
-  FROM ausp
-  WHERE objek = @lv_obj AND atinn = @gv_atinn.
-  IF sy-subrc <> 0 OR lv_value <> 'CMX'.
-    RETURN.
-  ENDIF.
-
-
-  SELECT SINGLE stat FROM jest INTO @lv_stat
-  WHERE objnr = @ps_order-objnr AND stat = 'I0002' AND inact = ''.
-  IF sy-subrc = 0. lv_rel_active = abap_true. ENDIF.
-
-  SELECT SINGLE stat FROM jest INTO @lv_stat
-  WHERE objnr = @ps_order-objnr AND stat = 'I0045' AND inact = ''.
-  IF sy-subrc = 0. lv_teco_active = abap_true. ENDIF.
-
-  SELECT SINGLE stat FROM jest INTO @lv_stat
-  WHERE objnr = @ps_order-objnr AND stat = 'I0043' AND inact = ''.
-  IF sy-subrc = 0. lv_locked_active = abap_true. ENDIF.
-
-  SELECT SINGLE stat FROM jest INTO @lv_stat
-  WHERE objnr = @ps_order-objnr AND stat = 'E0014' AND inact = ''.
-  IF sy-subrc = 0. lv_cmxs_active = abap_true. ENDIF.
-
-  SELECT SINGLE stat FROM jest INTO @lv_stat
-  WHERE objnr = @ps_order-objnr AND stat = 'E0010' AND inact = ''.
-  IF sy-subrc = 0. lv_cmxc_active = abap_true. ENDIF.
-
-
-  IF lv_cmxc_active = abap_true.
-    RETURN.
-  ENDIF.
-
-  SELECT SINGLE * FROM jcds
-  WHERE objnr = @ps_order-objnr
-  AND stat  = 'I0043'
-  AND inact = 'X'
-  INTO @DATA(ls_prev_lkd).
-  IF sy-subrc = 0.
-    lv_prev_locked = abap_true.
-  ENDIF.
-
-  SELECT SINGLE * FROM jcds
-  WHERE objnr = @ps_order-objnr
-  AND stat  = 'I0045'
-  AND inact = 'X'
-  INTO @DATA(ls_prev_teco).
-  IF sy-subrc = 0.
-    lv_prev_teco = abap_true.
-  ENDIF.
-
-
-  CONCATENATE so_date-low so_time-low INTO lv_input_ts.
-  CONCATENATE sy-mandt '30' ps_order-aufnr INTO lv_objid.
-
-  CLEAR: lv_jcds_ts, lv_cdhdr_ts, lv_in_window.
-
-  " === CASE 1: REL orders ===
-  IF lv_rel_active = abap_true.
-
-
-    IF lv_cmxs_active = abap_true.
-      " REL with CMXS: Check if header changes (CDHDR) are in window
-      SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
-      INTO ( @lv_chg_date, @lv_chg_time )
-      FROM cdhdr
-      WHERE objectclas = 'ORDER'
-      AND objectid   = @lv_objid
-      AND ( ( udate > @so_date-low )
-      OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
-
-      IF sy-subrc = 0 AND lv_chg_date IS NOT INITIAL.
-        CONCATENATE lv_chg_date lv_chg_time INTO lv_cdhdr_ts.
-        lv_in_window = abap_true.
-      ENDIF.
-
-    ELSE.
-      " REL without CMXS: Always include (no window check needed)
-      lv_in_window = abap_true.
-    ENDIF.
-
-
-    " === CASE 2: LOCKED orders ===
-  ELSEIF lv_locked_active = abap_true.
-
-
-    " LOCKED: Check if status change (JCDS) for I0043 is in window
-    SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+  " LKD must be inside window (JCDS)
+  SELECT udate, utime
     INTO ( @lv_sts_date, @lv_sts_time )
     FROM jcds
     WHERE objnr = @ps_order-objnr
-    AND stat = 'I0043'
-    AND ( ( udate > @so_date-low )
-    OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+      AND stat  = 'I0043'
+      AND inact = ''
+    ORDER BY udate DESCENDING utime DESCENDING
+    UP TO 1 ROWS.
+  ENDSELECT.
 
-    IF sy-subrc = 0 AND lv_sts_date IS NOT INITIAL.
-      CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
-      lv_in_window = abap_true.
-    ENDIF.
+  " Outside window → ignore
+  IF sy-subrc <> 0
+     OR lv_sts_date < so_date-low
+     OR ( lv_sts_date = so_date-low AND lv_sts_time < so_time-low ).
+    RETURN.
+  ENDIF.
+
+  lv_in_window = abap_true.
 
 
-    " === CASE 3: TECO orders ===
-  ELSEIF lv_teco_active = abap_true.
+ELSEIF lv_teco_active = abap_true.
 
+  CLEAR lv_in_window.
 
-    " TECO: Check if status change (JCDS) for I0045 is in window
-    SELECT MAX( udate ) AS max_date, MAX( utime ) AS max_time
+  " TECO must be inside window (JCDS)
+  SELECT udate, utime
     INTO ( @lv_sts_date, @lv_sts_time )
     FROM jcds
     WHERE objnr = @ps_order-objnr
-    AND stat = 'I0045'
-    AND ( ( udate > @so_date-low )
-    OR ( udate = @so_date-low AND utime >= @so_time-low ) ).
+      AND stat  = 'I0045'
+      AND inact = ''
+    ORDER BY udate DESCENDING utime DESCENDING
+    UP TO 1 ROWS.
+  ENDSELECT.
 
-    IF sy-subrc = 0 AND lv_sts_date IS NOT INITIAL.
-      CONCATENATE lv_sts_date lv_sts_time INTO lv_jcds_ts.
-      lv_in_window = abap_true.
-    ENDIF.
-
-
-  ENDIF.
-
-  " If not in window, skip this order
-  IF lv_in_window = abap_false.
+  IF sy-subrc <> 0
+     OR lv_sts_date < so_date-low
+     OR ( lv_sts_date = so_date-low AND lv_sts_time < so_time-low ).
     RETURN.
   ENDIF.
 
-
-  PERFORM f_get_operation USING ps_order CHANGING lv_vornr.
-
-
-  " 1. LOCKED with/without CMXS
-  IF lv_locked_active = abap_true.
-    lv_stat = 'I0043'.
-
-
-    IF lv_cmxs_active = abap_true.
-      gs_output-msg = 'Locked order with CMXS – send to CMX (skip BAPI)'.
-    ELSE.
-      gs_output-msg = 'Locked order without CMXS – skip both BAPI and CMX'.
-    ENDIF.
-
-    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-    APPEND gs_output TO gt_output.
-    SORT gt_output BY MaintenanceOrder.
-    RETURN.
-
-
-  ENDIF.
-
-  " 2. TECO → send to CMX
-  IF lv_teco_active = abap_true.
-    lv_stat = 'I0045'.
-    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-    gs_output-msg = 'TECO – send to CMX only (skip BAPI)'.
-    APPEND gs_output TO gt_output.
-    SORT gt_output BY MaintenanceOrder.
-    RETURN.
-  ENDIF.
-
-  " 3. REL → depends on CMXS and previous status
-  IF lv_rel_active = abap_true.
-    lv_stat = 'I0002'.
-
-
-    IF lv_prev_locked = abap_true.
-      IF lv_cmxs_active = abap_true.
-        gs_output-msg = 'Unlocked REL with CMXS – send to CMX only'.
-      ELSE.
-        gs_output-msg = 'Unlocked REL without CMXS – send to BAPI and CMX'.
-      ENDIF.
-
-    ELSEIF lv_prev_teco = abap_true.
-      IF lv_cmxs_active = abap_true.
-        gs_output-msg = 'TECO Cancelled REL with CMXS – send to CMX only'.
-      ELSE.
-        gs_output-msg = 'TECO Cancelled REL without CMXS – send to BAPI and CMX'.
-      ENDIF.
-
-    ELSE.
-      IF lv_cmxs_active = abap_true.
-        gs_output-msg = 'REL with CMXS – send to CMX only'.
-      ELSE.
-        gs_output-msg = 'REL without CMXS – send to BAPI and CMX'.
-      ENDIF.
-    ENDIF.
-
-    PERFORM f_prepare_output USING ps_order lv_vornr lv_stat.
-    APPEND gs_output TO gt_output.
-    SORT gt_output BY MaintenanceOrder.
-
-
-  ENDIF.
-
-ENDFORM.
+  lv_in_window = abap_true
